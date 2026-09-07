@@ -1,6 +1,8 @@
 {
-  "InfoMenu": "2.1.0",
-  "MetalicRustAutoUpdater": "1.4.0",
-  "MetalicRustTopTime": "3.0.0",
-  "QuickSmelt": "5.1.19"
+    "InfoMenu": "2.1.0",
+    "MetalicRust": "1.0.1",
+    "MetalicRustAutoCodeLock": "1.0.6",
+    "MetalicRustStreamerRewards": "2.3.0",
+    "MetalicRustTopTime": "3.0.0",
+    "QuickSmelt": "5.1.19"
 }
