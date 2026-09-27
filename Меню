@@ -1,0 +1,1537 @@
+using System;
+using System.Collections.Generic;
+using Oxide.Core;
+using Oxide.Core.Plugins;
+using UnityEngine;
+using Oxide.Game.Rust.Cui;
+
+namespace Oxide.Plugins
+{
+    [Info("MetalicRustMenu", "MetalicRust", "1.0.0")]
+    [Description("MetalicRust main server menu with Chat, Kits and navigation UI.")]
+    public class MetalicRustMenu : RustPlugin
+    {
+        #region Configuration
+
+        private PluginConfig config;
+
+        private class PluginConfig
+        {
+            public string OpenCommand = "menu";
+            public string Permission = "";
+
+            public string MainTitle = "METALICRUST";
+
+            public string CloseColor = "0.90 0.10 0.15 1";
+            public string ButtonColor = "0.12 0.13 0.14 0.96";
+            public string ActiveColor = "0.20 1.00 0.00 1";
+            public string PanelColor = "0.08 0.09 0.10 0.96";
+            public string HeaderColor = "0.17 0.18 0.19 0.98";
+            public string SecondaryColor = "0.28 0.29 0.30 0.95";
+            public string WhiteColor = "1 1 1 1";
+
+            public Dictionary<string, string> NavigationCommands =
+                new Dictionary<string, string>
+                {
+                    ["ИНФОРМАЦИЯ"] = "/info",
+                    ["ЧАТ"] = "",
+                    ["КИТЫ"] = "/kit",
+                    ["РЕПОРТЫ"] = "/report",
+                    ["МАГАЗИН"] = "/shop",
+                    ["ВАЙПБЛОК"] = "/wipeblock",
+                    ["СТАТИСТИКА"] = "/stats",
+                    ["УВЕДОМЛЕНИЯ"] = "/notifications",
+                    ["КРАФТЫ"] = "/craft",
+                    ["КАЛЕНДАРЬ ВАЙПОВ"] = "/wipe",
+                    ["ОБРАТНАЯ СВЯЗЬ"] = "/feedback",
+                    ["КОРЗИНА"] = "/cart"
+                };
+
+            public List<KitData> Kits = new List<KitData>
+            {
+                new KitData
+                {
+                    Name = "WIPEBONUS",
+                    Color = "1 1 1 1",
+                    Permission = "",
+                    Available = true,
+                    Remaining = "ОСТАЛОСЬ: 1"
+                },
+                new KitData
+                {
+                    Name = "BUILD",
+                    Color = "0.00 0.65 1.00 1",
+                    Permission = "",
+                    Available = true
+                },
+                new KitData
+                {
+                    Name = "MED",
+                    Color = "0.55 1.00 0.00 1",
+                    Permission = "",
+                    Available = true
+                },
+                new KitData
+                {
+                    Name = "FOOD",
+                    Color = "1.00 0.35 0.20 1",
+                    Permission = "",
+                    Available = true
+                },
+                new KitData
+                {
+                    Name = "HUNTER",
+                    Color = "1.00 0.25 0.40 1",
+                    Permission = "",
+                    Available = true
+                },
+                new KitData
+                {
+                    Name = "TOOLS",
+                    Color = "1 1 1 1",
+                    Permission = "",
+                    Available = true
+                },
+                new KitData
+                {
+                    Name = "DAILY",
+                    Color = "1 1 1 1",
+                    Permission = "",
+                    Available = false
+                },
+                new KitData
+                {
+                    Name = "SUPER PVP",
+                    Color = "1.00 0.45 0.15 1",
+                    Permission = "",
+                    Available = false
+                },
+                new KitData
+                {
+                    Name = "DELUXE",
+                    Color = "1.00 0.00 0.90 1",
+                    Permission = "",
+                    Available = false
+                },
+                new KitData
+                {
+                    Name = "DELUXE RESOURCES",
+                    Color = "1.00 0.00 0.90 1",
+                    Permission = "",
+                    Available = false
+                },
+                new KitData
+                {
+                    Name = "DELUXE TEA",
+                    Color = "1.00 0.00 0.90 1",
+                    Permission = "",
+                    Available = false
+                },
+                new KitData
+                {
+                    Name = "PREMIUM",
+                    Color = "0.40 1.00 0.00 1",
+                    Permission = "",
+                    Available = false
+                }
+            };
+        }
+
+        private class KitData
+        {
+            public string Name;
+            public string Color;
+            public string Permission;
+            public bool Available;
+            public string Remaining;
+        }
+
+        protected override void LoadDefaultConfig()
+        {
+            config = new PluginConfig();
+            SaveConfig();
+        }
+
+        protected override void LoadConfig()
+        {
+            base.LoadConfig();
+
+            try
+            {
+                config = Config.ReadObject<PluginConfig>();
+
+                if (config == null)
+                    throw new Exception();
+            }
+            catch
+            {
+                PrintWarning("Конфигурация повреждена. Создаю новую.");
+                LoadDefaultConfig();
+            }
+        }
+
+        protected override void SaveConfig()
+        {
+            Config.WriteObject(config, true);
+        }
+
+        #endregion
+
+        #region Constants
+
+        private const string MainPanel = "MetalicRustMenu.Main";
+        private const string ContentPanel = "MetalicRustMenu.Content";
+        private const string OverlayPanel = "MetalicRustMenu.Overlay";
+
+        #endregion
+
+        #region Oxide Hooks
+
+        private void Init()
+        {
+            permission.RegisterPermission("metalicrustmenu.use", this);
+
+            cmd.AddChatCommand(config.OpenCommand, this, nameof(ChatMenuCommand));
+            cmd.AddConsoleCommand("metalicrustmenu.open", this, nameof(ConsoleOpenCommand));
+            cmd.AddConsoleCommand("metalicrustmenu.close", this, nameof(ConsoleCloseCommand));
+            cmd.AddConsoleCommand("metalicrustmenu.chat", this, nameof(ConsoleChatCommand));
+            cmd.AddConsoleCommand("metalicrustmenu.kits", this, nameof(ConsoleKitsCommand));
+            cmd.AddConsoleCommand("metalicrustmenu.page", this, nameof(ConsolePageCommand));
+            cmd.AddConsoleCommand("metalicrustmenu.kittake", this, nameof(ConsoleKitTakeCommand));
+            cmd.AddConsoleCommand("metalicrustmenu.side", this, nameof(ConsoleSideCommand));
+            cmd.AddConsoleCommand("metalicrustmenu.noop", this, nameof(ConsoleNoopCommand));
+        }
+
+        private void Unload()
+        {
+            foreach (var player in BasePlayer.activePlayerList)
+                DestroyMenu(player);
+        }
+
+        private void OnPlayerDisconnected(BasePlayer player, string reason)
+        {
+            DestroyMenu(player);
+        }
+
+        #endregion
+
+        #region Commands
+
+        private void ChatMenuCommand(BasePlayer player, string command, string[] args)
+        {
+            if (player == null)
+                return;
+
+            if (!HasPermission(player))
+                return;
+
+            OpenMainMenu(player);
+        }
+
+        private void ConsoleOpenCommand(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+
+            if (player == null)
+                return;
+
+            if (!HasPermission(player))
+                return;
+
+            OpenMainMenu(player);
+        }
+
+        private void ConsoleCloseCommand(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+
+            if (player == null)
+                return;
+
+            DestroyMenu(player);
+        }
+
+        private void ConsoleChatCommand(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+
+            if (player == null)
+                return;
+
+            if (!HasPermission(player))
+                return;
+
+            OpenChatPage(player, 0);
+        }
+
+        private void ConsoleKitsCommand(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+
+            if (player == null)
+                return;
+
+            if (!HasPermission(player))
+                return;
+
+            OpenKitsPage(player, 0);
+        }
+
+        private void ConsolePageCommand(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+
+            if (player == null)
+                return;
+
+            if (!HasPermission(player))
+                return;
+
+            int page = 0;
+
+            if (arg.Args != null && arg.Args.Length > 0)
+                int.TryParse(arg.Args[0], out page);
+
+            page = Mathf.Clamp(page, 0, 1);
+
+            OpenKitsPage(player, page);
+        }
+
+        private void ConsoleKitTakeCommand(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+
+            if (player == null)
+                return;
+
+            if (arg.Args == null || arg.Args.Length == 0)
+                return;
+
+            string kitName = arg.Args[0];
+
+            if (string.IsNullOrEmpty(kitName))
+                return;
+
+            DestroyMenu(player);
+
+            /*
+             * Основной вариант для IQKits:
+             * вызываем обычную чат-команду /kit НАЗВАНИЕ.
+             *
+             * Это позволяет оставить выдачу китов самому IQKits.
+             */
+            player.SendConsoleCommand("chat.say", "/kit " + kitName);
+        }
+
+        private void ConsoleSideCommand(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+
+            if (player == null)
+                return;
+
+            if (arg.Args == null || arg.Args.Length == 0)
+                return;
+
+            string key = arg.Args[0];
+
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            if (key == "ЧАТ")
+            {
+                OpenChatPage(player, 0);
+                return;
+            }
+
+            if (key == "КИТЫ")
+            {
+                OpenKitsPage(player, 0);
+                return;
+            }
+
+            string command;
+
+            if (!config.NavigationCommands.TryGetValue(key, out command))
+                return;
+
+            if (string.IsNullOrEmpty(command))
+                return;
+
+            DestroyMenu(player);
+
+            if (!command.StartsWith("/"))
+                command = "/" + command;
+
+            player.SendConsoleCommand("chat.say", command);
+        }
+
+        private void ConsoleNoopCommand(ConsoleSystem.Arg arg)
+        {
+        }
+
+        #endregion
+
+        #region Permission
+
+        private bool HasPermission(BasePlayer player)
+        {
+            if (player == null)
+                return false;
+
+            if (player.IsAdmin)
+                return true;
+
+            if (string.IsNullOrEmpty(config.Permission))
+                return true;
+
+            return permission.UserHasPermission(player.UserIDString, config.Permission);
+        }
+
+        #endregion
+
+        #region Main Menu
+
+        private void OpenMainMenu(BasePlayer player)
+        {
+            DestroyMenu(player);
+
+            var container = new CuiElementContainer();
+
+            AddBackground(container);
+
+            AddCloseButton(container);
+
+            AddSideMenu(container, player, "ИНФОРМАЦИЯ");
+
+            AddMainContent(container, player);
+
+            CuiHelper.AddUi(player, container);
+        }
+
+        private void AddBackground(CuiElementContainer container)
+        {
+            container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "0 0 0 0.30"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0",
+                    AnchorMax = "1 1"
+                },
+                CursorEnabled = true
+            }, "Overlay", MainPanel);
+        }
+
+        private void AddCloseButton(CuiElementContainer container)
+        {
+            container.Add(new CuiButton
+            {
+                Button =
+                {
+                    Color = config.CloseColor,
+                    Command = "metalicrustmenu.close"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.875 0.875",
+                    AnchorMax = "0.985 0.925"
+                },
+                Text =
+                {
+                    Text = "✖ ЗАКРЫТЬ",
+                    FontSize = 16,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "1 1 1 1",
+                    Font = "RobotoCondensed-Bold.ttf"
+                }
+            }, MainPanel);
+        }
+
+        private void AddMainContent(CuiElementContainer container, BasePlayer player)
+        {
+            container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = config.PanelColor
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.245 0.16",
+                    AnchorMax = "0.985 0.875"
+                }
+            }, MainPanel, ContentPanel);
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "ИНФОРМАЦИЯ",
+                18,
+                TextAnchor.UpperLeft,
+                "0.025 0.91",
+                "0.98 0.98",
+                "1 1 1 1"
+            );
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "METALICRUST",
+                32,
+                TextAnchor.MiddleCenter,
+                "0.05 0.72",
+                "0.95 0.84",
+                "0.20 1 0 1"
+            );
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "VANILLA+  •  X2  •  NOLIMIT",
+                19,
+                TextAnchor.MiddleCenter,
+                "0.05 0.62",
+                "0.95 0.70",
+                "1 1 1 1"
+            );
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "ИНФОРМАЦИЯ О СЕРВЕРЕ",
+                21,
+                TextAnchor.MiddleCenter,
+                "0.20 0.46",
+                "0.80 0.54",
+                "1 1 1 1"
+            );
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "X2 РЕСУРСЫ\nKITS\nFREE SKINS\nFREE DLC\nRAIDABLE BASES\nМИНИМУМ ПРАВИЛ • МАКСИМУМ ACTION",
+                17,
+                TextAnchor.MiddleCenter,
+                "0.15 0.17",
+                "0.85 0.45",
+                "0.82 0.82 0.82 1"
+            );
+        }
+
+        #endregion
+
+        #region Side Menu
+
+        private void AddSideMenu(
+            CuiElementContainer container,
+            BasePlayer player,
+            string active)
+        {
+            string[] buttons =
+            {
+                "ИНФОРМАЦИЯ",
+                "ЧАТ",
+                "КИТЫ",
+                "РЕПОРТЫ",
+                "МАГАЗИН",
+                "ВАЙПБЛОК",
+                "СТАТИСТИКА",
+                "УВЕДОМЛЕНИЯ",
+                "КРАФТЫ",
+                "КАЛЕНДАРЬ ВАЙПОВ",
+                "ОБРАТНАЯ СВЯЗЬ",
+                "КОРЗИНА"
+            };
+
+            float top = 0.82f;
+            float height = 0.065f;
+            float gap = 0.012f;
+
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                string title = buttons[i];
+
+                float minY = top - (i + 1) * height - i * gap;
+                float maxY = top - i * height - i * gap;
+
+                string color =
+                    title == active
+                        ? config.ActiveColor
+                        : config.ButtonColor;
+
+                container.Add(new CuiButton
+                {
+                    Button =
+                    {
+                        Color = color,
+                        Command = "metalicrustmenu.side \"" + title + "\""
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.035 " + minY.ToString("0.###"),
+                        AnchorMax = "0.235 " + maxY.ToString("0.###")
+                    },
+                    Text =
+                    {
+                        Text = title,
+                        FontSize = 15,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 1 1 1",
+                        Font = "RobotoCondensed-Bold.ttf"
+                    }
+                }, MainPanel);
+            }
+        }
+
+        #endregion
+
+        #region Chat
+
+        private void OpenChatPage(BasePlayer player, int tab)
+        {
+            DestroyMenu(player);
+
+            var container = new CuiElementContainer();
+
+            AddBackground(container);
+            AddCloseButton(container);
+            AddSideMenu(container, player, "ЧАТ");
+
+            container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = config.PanelColor
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.245 0.16",
+                    AnchorMax = "0.985 0.875"
+                }
+            }, MainPanel, ContentPanel);
+
+            AddChatPreview(container);
+
+            AddChatTabs(container, tab);
+
+            if (tab == 0)
+                AddPrefixesRanks(container);
+
+            if (tab == 1)
+                AddColorsFunctions(container);
+
+            if (tab == 2)
+                AddIgnoreList(container);
+
+            CuiHelper.AddUi(player, container);
+        }
+
+        private void AddChatPreview(CuiElementContainer container)
+        {
+            container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = config.HeaderColor
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.02 0.77",
+                    AnchorMax = "0.98 0.98"
+                }
+            }, ContentPanel);
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "ПРИМЕР ОТОБРАЖЕНИЯ:",
+                13,
+                TextAnchor.UpperLeft,
+                "0.03 0.88",
+                "0.40 0.96",
+                "0.75 0.75 0.75 1"
+            );
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "💥",
+                18,
+                TextAnchor.MiddleCenter,
+                "0.03 0.79",
+                "0.075 0.88",
+                "1 1 1 1"
+            );
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "ST:",
+                17,
+                TextAnchor.MiddleLeft,
+                "0.075 0.79",
+                "0.12 0.88",
+                "0 0.70 1 1"
+            );
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "Всем привет!",
+                17,
+                TextAnchor.MiddleLeft,
+                "0.12 0.79",
+                "0.50 0.88",
+                "1 1 1 1"
+            );
+        }
+
+        private void AddChatTabs(CuiElementContainer container, int activeTab)
+        {
+            string[] tabs =
+            {
+                "ПРЕФИКСЫ И РАНГИ",
+                "ЦВЕТА И ФУНКЦИИ",
+                "ИГНОР-ЛИСТ"
+            };
+
+            float[] mins =
+            {
+                0.02f,
+                0.31f,
+                0.60f
+            };
+
+            float[] maxs =
+            {
+                0.30f,
+                0.58f,
+                0.72f
+            };
+
+            for (int i = 0; i < tabs.Length; i++)
+            {
+                string color =
+                    i == activeTab
+                        ? config.ActiveColor
+                        : config.SecondaryColor;
+
+                container.Add(new CuiButton
+                {
+                    Button =
+                    {
+                        Color = color,
+                        Command = "metalicrustmenu.chat"
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = mins[i] + " 0.69",
+                        AnchorMax = maxs[i] + " 0.76"
+                    },
+                    Text =
+                    {
+                        Text = tabs[i],
+                        FontSize = 15,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 1 1 1",
+                        Font = "RobotoCondensed-Bold.ttf"
+                    }
+                }, ContentPanel);
+
+                if (i == 1)
+                {
+                    container.Add(new CuiButton
+                    {
+                        Button =
+                        {
+                            Color = color,
+                            Command = "metalicrustmenu.chat"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0.31 0.69",
+                            AnchorMax = "0.58 0.76"
+                        },
+                        Text =
+                        {
+                            Text = tabs[i],
+                            FontSize = 15,
+                            Align = TextAnchor.MiddleCenter,
+                            Color = "1 1 1 1",
+                            Font = "RobotoCondensed-Bold.ttf"
+                        }
+                    }, ContentPanel);
+                }
+
+                if (i == 2)
+                {
+                    container.Add(new CuiButton
+                    {
+                        Button =
+                        {
+                            Color = color,
+                            Command = "metalicrustmenu.noop"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0.60 0.69",
+                            AnchorMax = "0.72 0.76"
+                        },
+                        Text =
+                        {
+                            Text = tabs[i],
+                            FontSize = 15,
+                            Align = TextAnchor.MiddleCenter,
+                            Color = "1 1 1 1",
+                            Font = "RobotoCondensed-Bold.ttf"
+                        }
+                    }, ContentPanel);
+                }
+            }
+        }
+
+        private void AddPrefixesRanks(CuiElementContainer container)
+        {
+            AddHeader(
+                container,
+                ContentPanel,
+                "ПРЕФИКСЫ",
+                "0.025 0.62",
+                "0.47 0.68"
+            );
+
+            AddHeader(
+                container,
+                ContentPanel,
+                "РАНГИ",
+                "0.48 0.62",
+                "0.72 0.68"
+            );
+
+            AddHeader(
+                container,
+                ContentPanel,
+                "УСЛОВИЯ",
+                "0.73 0.62",
+                "0.98 0.68"
+            );
+
+            string[] prefixes =
+            {
+                "БЕЗ ПРЕФИКСА",
+                "VIP",
+                "PREMIUM",
+                "DELUXE",
+                "SUPER",
+                "SUPER"
+            };
+
+            string[] prefixColors =
+            {
+                "1 1 1 1",
+                "1 0.85 0 1",
+                "0.40 1 0 1",
+                "1 0 0.85 1",
+                "1 0.35 0.20 1",
+                "0.35 0.05 1 1"
+            };
+
+            for (int i = 0; i < prefixes.Length; i++)
+            {
+                float maxY = 0.59f - i * 0.055f;
+                float minY = maxY - 0.05f;
+
+                AddLabelButton(
+                    container,
+                    ContentPanel,
+                    prefixes[i],
+                    prefixColors[i],
+                    "0.025 " + minY.ToString("0.###"),
+                    "0.47 " + maxY.ToString("0.###")
+                );
+            }
+
+            string[] ranks =
+            {
+                "БЕЗ РАНГА",
+                "КЕПКА",
+                "МЕСТНЫЙ",
+                "ФАРМИЛА",
+                "ЗАДРОТ",
+                "БОСС"
+            };
+
+            string[] rankColors =
+            {
+                "1 1 1 1",
+                "0 0.65 1 1",
+                "1 0.40 0.15 1",
+                "1 1 0 1",
+                "0 0.65 1 1",
+                "0.40 1 0 1"
+            };
+
+            for (int i = 0; i < ranks.Length; i++)
+            {
+                float maxY = 0.59f - i * 0.055f;
+                float minY = maxY - 0.05f;
+
+                AddLabelButton(
+                    container,
+                    ContentPanel,
+                    ranks[i],
+                    rankColors[i],
+                    "0.48 " + minY.ToString("0.###"),
+                    "0.72 " + maxY.ToString("0.###")
+                );
+            }
+
+            AddCondition(
+                container,
+                "ОБЩИЙ ПРОЦЕНТ: 49.73 %",
+                "0.73 0.53",
+                "0.98 0.59"
+            );
+
+            AddCondition(
+                container,
+                "ВРЕМЯ В СЕТИ: 63.75 %",
+                "0.73 0.47",
+                "0.98 0.53"
+            );
+
+            AddCondition(
+                container,
+                "ФАРМ: 35.70 %",
+                "0.73 0.41",
+                "0.98 0.47"
+            );
+        }
+
+        private void AddColorsFunctions(CuiElementContainer container)
+        {
+            AddHeader(
+                container,
+                ContentPanel,
+                "ЦВЕТА НИКА",
+                "0.025 0.62",
+                "0.30 0.68"
+            );
+
+            AddHeader(
+                container,
+                ContentPanel,
+                "ЦВЕТА СООБЩЕНИЯ",
+                "0.31 0.62",
+                "0.58 0.68"
+            );
+
+            AddHeader(
+                container,
+                ContentPanel,
+                "ФУНКЦИИ",
+                "0.59 0.62",
+                "0.98 0.68"
+            );
+
+            string[] nicknameColors =
+            {
+                "0.00 1.00 0.15 1",
+                "1.00 0.80 0.00 1",
+                "0.00 0.80 1.00 1",
+                "1.00 0.00 0.90 1",
+                "0.75 0.75 0.75 1"
+            };
+
+            for (int i = 0; i < nicknameColors.Length; i++)
+            {
+                float x = 0.025f + i * 0.052f;
+
+                container.Add(new CuiButton
+                {
+                    Button =
+                    {
+                        Color = nicknameColors[i],
+                        Command = "metalicrustmenu.noop"
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = x.ToString("0.###") + " 0.52",
+                        AnchorMax = (x + 0.045f).ToString("0.###") + " 0.60"
+                    },
+                    Text =
+                    {
+                        Text = "♟",
+                        FontSize = 14,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 1 1 1"
+                    }
+                }, ContentPanel);
+            }
+
+            string[] messageColors =
+            {
+                "1 1 1 1",
+                "1 0.65 0.10 1",
+                "0.00 0.70 1 1",
+                "1 0.00 0.85 1",
+                "0.80 0.80 0.80 1"
+            };
+
+            for (int i = 0; i < messageColors.Length; i++)
+            {
+                float x = 0.31f + i * 0.052f;
+
+                container.Add(new CuiButton
+                {
+                    Button =
+                    {
+                        Color = messageColors[i],
+                        Command = "metalicrustmenu.noop"
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = x.ToString("0.###") + " 0.52",
+                        AnchorMax = (x + 0.045f).ToString("0.###") + " 0.60"
+                    },
+                    Text =
+                    {
+                        Text = "♟",
+                        FontSize = 14,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 1 1 1"
+                    }
+                }, ContentPanel);
+            }
+
+            AddFunctionRow(
+                container,
+                "ЛИЧНЫЕ СООБЩЕНИЯ",
+                "0.59 0.52",
+                "0.98 0.60"
+            );
+
+            AddFunctionRow(
+                container,
+                "ЗВУКОВЫЕ ЭФФЕКТЫ",
+                "0.59 0.43",
+                "0.98 0.51"
+            );
+        }
+
+        private void AddIgnoreList(CuiElementContainer container)
+        {
+            AddInput(
+                container,
+                "ВВЕДИТЕ НИК ИЛИ СТИМ",
+                "0.025 0.60",
+                "0.38 0.66"
+            );
+
+            AddLabelButton(
+                container,
+                "П",
+                "1 1 1 1",
+                "0.025 0.60",
+                "0.075 0.66"
+            );
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "СПИСОК ИГНОРИРУЕМЫХ ИГРОКОВ ПУСТ",
+                18,
+                TextAnchor.MiddleCenter,
+                "0.20 0.38",
+                "0.80 0.50",
+                "1 1 1 1"
+            );
+        }
+
+        #endregion
+
+        #region Kits
+
+        private void OpenKitsPage(BasePlayer player, int page)
+        {
+            DestroyMenu(player);
+
+            var container = new CuiElementContainer();
+
+            AddBackground(container);
+            AddCloseButton(container);
+            AddSideMenu(container, player, "КИТЫ");
+
+            container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = config.PanelColor
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.245 0.16",
+                    AnchorMax = "0.985 0.875"
+                }
+            }, MainPanel, ContentPanel);
+
+            const int perPage = 12;
+
+            int start = page * perPage;
+            int end = Math.Min(start + perPage, config.Kits.Count);
+
+            int index = 0;
+
+            for (int i = start; i < end; i++)
+            {
+                KitData kit = config.Kits[i];
+
+                int column = index % 4;
+                int row = index / 4;
+
+                float xMin = 0.02f + column * 0.255f;
+                float xMax = xMin + 0.245f;
+
+                float yMax = 0.82f - row * 0.235f;
+                float yMin = yMax - 0.22f;
+
+                AddKitCard(
+                    container,
+                    player,
+                    kit,
+                    xMin,
+                    yMin,
+                    xMax,
+                    yMax
+                );
+
+                index++;
+            }
+
+            AddPageButtons(container, page);
+
+            CuiHelper.AddUi(player, container);
+        }
+
+        private void AddKitCard(
+            CuiElementContainer container,
+            BasePlayer player,
+            KitData kit,
+            float xMin,
+            float yMin,
+            float xMax,
+            float yMax)
+        {
+            string panelName = container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "0.18 0.19 0.20 0.98"
+                },
+                RectTransform =
+                {
+                    AnchorMin = xMin.ToString("0.###") + " " + yMin.ToString("0.###"),
+                    AnchorMax = xMax.ToString("0.###") + " " + yMax.ToString("0.###")
+                }
+            }, ContentPanel);
+
+            if (!kit.Available)
+            {
+                container.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = "🔒",
+                        FontSize = 30,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 1 1 1"
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.03 0.62",
+                        AnchorMax = "0.18 0.95"
+                    }
+                }, panelName);
+            }
+
+            if (!string.IsNullOrEmpty(kit.Remaining))
+            {
+                container.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = kit.Remaining,
+                        FontSize = 10,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 0.55 0.20 1",
+                        Font = "RobotoCondensed-Bold.ttf"
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.35 0.88",
+                        AnchorMax = "0.95 0.99"
+                    }
+                }, panelName);
+            }
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = kit.Name,
+                    FontSize = 20,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = kit.Color,
+                    Font = "RobotoCondensed-Bold.ttf"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.04 0.47",
+                    AnchorMax = "0.96 0.78"
+                }
+            }, panelName);
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = kit.Available ? "ПОЛУЧИТ" : "НЕДОСТУПНО",
+                    FontSize = 14,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "1 1 1 1",
+                    Font = "RobotoCondensed-Bold.ttf"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.10 0.27",
+                    AnchorMax = "0.90 0.48"
+                }
+            }, panelName);
+
+            container.Add(new CuiButton
+            {
+                Button =
+                {
+                    Color = "0.82 0.82 0.82 1",
+                    Command = kit.Available
+                        ? "metalicrustmenu.kittake " + kit.Name
+                        : "metalicrustmenu.noop"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.67 0.04",
+                    AnchorMax = "0.96 0.20"
+                },
+                Text =
+                {
+                    Text = "ПОДРОБНЕЕ",
+                    FontSize = 9,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "0.25 0.25 0.25 1",
+                    Font = "RobotoCondensed-Bold.ttf"
+                }
+            }, panelName);
+        }
+
+        private void AddPageButtons(CuiElementContainer container, int page)
+        {
+            container.Add(new CuiButton
+            {
+                Button =
+                {
+                    Color = "0.20 0.21 0.22 0.98",
+                    Command = page > 0
+                        ? "metalicrustmenu.page " + (page - 1)
+                        : "metalicrustmenu.noop"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.80 0.025",
+                    AnchorMax = "0.835 0.09"
+                },
+                Text =
+                {
+                    Text = "◀",
+                    FontSize = 18,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "1 1 1 1"
+                }
+            }, ContentPanel);
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = (page + 1) + "-2",
+                    FontSize = 14,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "0.85 0.85 0.85 1",
+                    Font = "RobotoCondensed-Bold.ttf"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.835 0.025",
+                    AnchorMax = "0.90 0.09"
+                }
+            }, ContentPanel);
+
+            container.Add(new CuiButton
+            {
+                Button =
+                {
+                    Color = "0.20 0.21 0.22 0.98",
+                    Command = page < 1
+                        ? "metalicrustmenu.page " + (page + 1)
+                        : "metalicrustmenu.noop"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.90 0.025",
+                    AnchorMax = "0.935 0.09"
+                },
+                Text =
+                {
+                    Text = "▶",
+                    FontSize = 18,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "1 1 1 1"
+                }
+            }, ContentPanel);
+        }
+
+        #endregion
+
+        #region UI Helpers
+
+        private void AddHeader(
+            CuiElementContainer container,
+            string parent,
+            string text,
+            string anchorMin,
+            string anchorMax)
+        {
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = text,
+                    FontSize = 15,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "0.35 0.35 0.35 1",
+                    Font = "RobotoCondensed-Bold.ttf"
+                },
+                RectTransform =
+                {
+                    AnchorMin = anchorMin,
+                    AnchorMax = anchorMax
+                }
+            }, parent);
+        }
+
+        private void AddLabelButton(
+            CuiElementContainer container,
+            string parent,
+            string text,
+            string textColor,
+            string anchorMin,
+            string anchorMax)
+        {
+            container.Add(new CuiButton
+            {
+                Button =
+                {
+                    Color = "0.22 0.23 0.24 0.98",
+                    Command = "metalicrustmenu.noop"
+                },
+                RectTransform =
+                {
+                    AnchorMin = anchorMin,
+                    AnchorMax = anchorMax
+                },
+                Text =
+                {
+                    Text = text,
+                    FontSize = 15,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = textColor,
+                    Font = "RobotoCondensed-Bold.ttf"
+                }
+            }, parent);
+        }
+
+        private void AddCondition(
+            CuiElementContainer container,
+            string text,
+            string anchorMin,
+            string anchorMax)
+        {
+            container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = config.ActiveColor
+                },
+                RectTransform =
+                {
+                    AnchorMin = anchorMin,
+                    AnchorMax = anchorMax
+                }
+            }, ContentPanel);
+
+            AddLabel(
+                container,
+                ContentPanel,
+                text,
+                13,
+                TextAnchor.MiddleCenter,
+                anchorMin,
+                anchorMax,
+                "1 1 1 1"
+            );
+        }
+
+        private void AddFunctionRow(
+            CuiElementContainer container,
+            string text,
+            string anchorMin,
+            string anchorMax)
+        {
+            container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "0.30 0.31 0.32 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = anchorMin,
+                    AnchorMax = anchorMax
+                }
+            }, ContentPanel);
+
+            AddLabel(
+                container,
+                ContentPanel,
+                "▦",
+                16,
+                TextAnchor.MiddleCenter,
+                "0.60 " + anchorMin.Split(' ')[1],
+                "0.64 " + anchorMax.Split(' ')[1],
+                "0.20 1 0 1"
+            );
+
+            string minX = anchorMin.Split(' ')[0];
+            string minY = anchorMin.Split(' ')[1];
+            string maxX = anchorMax.Split(' ')[0];
+            string maxY = anchorMax.Split(' ')[1];
+
+            float fMinX = float.Parse(minX);
+            float fMaxX = float.Parse(maxX);
+
+            AddLabel(
+                container,
+                ContentPanel,
+                text,
+                13,
+                TextAnchor.MiddleLeft,
+                (fMinX + 0.06f).ToString("0.###") + " " + minY,
+                (fMaxX - 0.01f).ToString("0.###") + " " + maxY,
+                "1 1 1 1"
+            );
+        }
+
+        private void AddInput(
+            CuiElementContainer container,
+            string text,
+            string anchorMin,
+            string anchorMax)
+        {
+            container.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "0.16 0.17 0.18 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = anchorMin,
+                    AnchorMax = anchorMax
+                }
+            }, ContentPanel);
+
+            AddLabel(
+                container,
+                ContentPanel,
+                text,
+                12,
+                TextAnchor.MiddleLeft,
+                "0.075 0.60",
+                "0.37 0.66",
+                "0.65 0.65 0.65 1"
+            );
+        }
+
+        private void AddLabel(
+            CuiElementContainer container,
+            string parent,
+            string text,
+            int fontSize,
+            TextAnchor align,
+            string anchorMin,
+            string anchorMax,
+            string color)
+        {
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = text,
+                    FontSize = fontSize,
+                    Align = align,
+                    Color = color,
+                    Font = "RobotoCondensed-Bold.ttf"
+                },
+                RectTransform =
+                {
+                    AnchorMin = anchorMin,
+                    AnchorMax = anchorMax
+                }
+            }, parent);
+        }
+
+        private void AddLabelButton(
+            CuiElementContainer container,
+            string text,
+            string textColor,
+            string anchorMin,
+            string anchorMax)
+        {
+            AddLabelButton(
+                container,
+                ContentPanel,
+                text,
+                textColor,
+                anchorMin,
+                anchorMax
+            );
+        }
+
+        #endregion
+
+        #region Destroy
+
+        private void DestroyMenu(BasePlayer player)
+        {
+            if (player == null)
+                return;
+
+            CuiHelper.DestroyUi(player, MainPanel);
+        }
+
+        #endregion
+    }
+}
