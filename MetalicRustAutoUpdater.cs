@@ -10,13 +10,43 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("MetalicRustAutoUpdater", "MetalicRust", "3.0.0")]
-    [Description("Автоматическая проверка и безопасное обновление плагинов MetalicRust через uMod и GitHub.")]
+    [Info("MetalicRustAutoUpdater", "MetalicRust", "3.0.1")]
+    [Description("MetalicRust: безопасное обновление плагинов только из uMod и GitHub.")]
     public class MetalicRustAutoUpdater : RustPlugin
     {
+        private Configuration config;
+        private Timer updateTimer;
+        private bool checkRunning;
+        private readonly HashSet<string> updating = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, PluginStatus> statuses = new Dictionary<string, PluginStatus>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, DateTime> sourceCooldowns = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private bool initializedOnce;
+
         #region Configuration
 
-        private Configuration config;
+        private class PluginEntry
+        {
+            [JsonProperty("Название")] public string Name;
+            [JsonProperty("Источник")] public string Source;
+            [JsonProperty("uMod slug")] public string Slug;
+            [JsonProperty("GitHub файл")] public string GitHubFile;
+            [JsonProperty("Локальный файл")] public string FileName;
+            [JsonProperty("Автообновление")] public bool AutoUpdate = true;
+            [JsonProperty("Защищён")] public bool Protected;
+
+            public PluginEntry() { }
+
+            public PluginEntry(string name, string source, string slug, string githubFile, string fileName, bool autoUpdate, bool protectedPlugin)
+            {
+                Name = name;
+                Source = source;
+                Slug = slug;
+                GitHubFile = githubFile;
+                FileName = fileName;
+                AutoUpdate = autoUpdate;
+                Protected = protectedPlugin;
+            }
+        }
 
         private class Configuration
         {
@@ -29,72 +59,110 @@ namespace Oxide.Plugins
             [JsonProperty("Задержка первой проверки")]
             public float InitialCheckDelay = 30f;
 
-            [JsonProperty("Задержка перед обновлением")]
+            [JsonProperty("Задержка перед установкой")]
             public float UpdateDelay = 5f;
 
+            [JsonProperty("Задержка между сетевыми запросами")]
+            public float RequestDelay = 0.75f;
+
             [JsonProperty("Количество сетевых повторов")]
-            public int NetworkRetries = 4;
+            public int NetworkRetries = 2;
 
-            [JsonProperty("Задержка между сетевыми повторами")]
-            public float NetworkRetryDelay = 5f;
+            [JsonProperty("Задержка между повторами")]
+            public float NetworkRetryDelay = 10f;
 
-            [JsonProperty("Создавать резервную копию .bak")]
+            [JsonProperty("Задержка после HTTP 429")]
+            public float RateLimitRetryDelay = 120f;
+
+            [JsonProperty("Пауза после HTTP 404, минут")]
+            public float NotFoundCooldownMinutes = 360f;
+
+            [JsonProperty("Создавать .bak")]
             public bool CreateBackup = true;
 
-            [JsonProperty("Откатывать при ошибке")]
+            [JsonProperty("Откатывать при ошибке reload")]
             public bool RollbackOnError = true;
 
-            [JsonProperty("Проверять плагин после reload")]
+            [JsonProperty("Проверять после reload")]
             public bool VerifyAfterReload = true;
 
             [JsonProperty("Задержка проверки после reload")]
-            public float VerifyDelay = 5f;
+            public float VerifyDelay = 6f;
 
             [JsonProperty("Уведомлять администраторов")]
             public bool NotifyAdmins = true;
 
-            [JsonProperty("Показывать предупреждения жёлтым")]
-            public bool YellowNotFound = true;
-
             [JsonProperty("GitHub Base URL")]
-            public string GitHubBaseUrl =
-                "https://raw.githubusercontent.com/qwrwetqa/MetalicRust-Plugins/main/";
+            public string GitHubBaseUrl = "https://raw.githubusercontent.com/qwrwetqa/MetalicRust-Plugins/main/";
 
-            [JsonProperty("GitHub versions.json")]
-            public string GitHubVersionsUrl =
-                "https://raw.githubusercontent.com/qwrwetqa/MetalicRust-Plugins/main/versions.json";
+            [JsonProperty("Плагины для обновления")]
+            public List<PluginEntry> Plugins = DefaultPlugins();
 
-            [JsonProperty("Плагины uMod")]
-            public Dictionary<string, string> UModPlugins =
-                new Dictionary<string, string>
-                {
-                    { "GUIShop", "guishop" },
-                    { "GatherManager", "gather-manager" },
-                    { "GatherRewards", "gather-rewards" },
-                    { "ImageLibrary", "image-library" },
-                    { "KillRewards", "kill-rewards" },
-                    { "NTeleportation", "nteleportation" },
-                    { "NoGiveNotices", "no-give-notices" },
-                    { "PlayerAdministration", "player-administration" },
-                    { "PlayerRankings", "player-rankings" },
-                    { "PlaytimeTracker", "playtime-tracker" },
-                    { "PortableVehicles", "portable-vehicles" },
-                    { "Quests", "quests" },
-                    { "ServerRewards", "server-rewards" },
-                    { "StackSizeController", "stack-size-controller" }
-                };
+            public static List<PluginEntry> DefaultPlugins()
+            {
+                var list = new List<PluginEntry>();
 
-            [JsonProperty("Защищенные плагины")]
-            public List<string> ProtectedPlugins =
-                new List<string>
-                {
-                    "MetalicRustAutoUpdater",
-                    "TopPlugin",
-                    "GameStores",
-                    "MicroPanel",
-                    "Building Upgrade",
-                    "BuildingUpgrade"
-                };
+                // uMod. Только плагины, для которых источник действительно uMod.
+                AddUmod(list, "Advert Messages", "advert-messages", "AdvertMessages.cs");
+                AddUmod(list, "Better Chat", "better-chat", "BetterChat.cs");
+                AddUmod(list, "Building Skins", "building-skins", "BuildingSkins.cs");
+                AddUmod(list, "Building Workbench", "building-workbench", "BuildingWorkbench.cs");
+                AddUmod(list, "Coloured Chat", "coloured-chat", "ColouredChat.cs");
+                AddUmod(list, "Connection DB", "connection-db", "ConnectionDB.cs");
+                AddUmod(list, "Copy Paste", "copy-paste", "CopyPaste.cs");
+                AddUmod(list, "Custom Genetics", "custom-genetics", "CustomGenetics.cs");
+                AddUmod(list, "Friends", "friends", "Friends.cs");
+                AddUmod(list, "GUIAnnouncements", "gui-announcements", "GUIAnnouncements.cs");
+                AddUmod(list, "Gather Manager", "gather-manager", "GatherManager.cs");
+                AddUmod(list, "Gather Rewards", "gather-rewards", "GatherRewards.cs");
+                AddUmod(list, "Image Library", "image-library", "ImageLibrary.cs");
+                AddUmod(list, "Inventory Viewer", "inventory-viewer", "InventoryViewer.cs");
+                AddUmod(list, "Kill Rewards", "kill-rewards", "KillRewards.cs");
+                AddUmod(list, "NTeleportation", "nteleportation", "NTeleportation.cs");
+                AddUmod(list, "No Give Notices", "no-give-notices", "NoGiveNotices.cs");
+                AddUmod(list, "PlayerAdministration", "player-administration", "PlayerAdministration.cs");
+                AddUmod(list, "Player Rankings", "player-rankings", "PlayerRankings.cs");
+                AddUmod(list, "Playtime Tracker", "playtime-tracker", "PlaytimeTracker.cs");
+                AddUmod(list, "Portable Vehicles", "portable-vehicles", "PortableVehicles.cs");
+                AddUmod(list, "Quests", "quests", "Quests.cs");
+                AddUmod(list, "Remover Tool", "remover-tool", "RemoverTool.cs");
+                AddUmod(list, "Server Rewards", "server-rewards", "ServerRewards.cs");
+                AddUmod(list, "Stack Size Controller", "stack-size-controller", "StackSizeController.cs");
+                AddUmod(list, "TimeOfDay", "time-of-day", "TimeOfDay.cs");
+                AddUmod(list, "Timed Permissions", "timed-permissions", "TimedPermissions.cs");
+                AddUmod(list, "Vanish", "vanish", "Vanish.cs");
+                AddUmod(list, "Welcomer", "welcomer", "Welcomer.cs");
+                AddUmod(list, "Backpacks", "backpacks", "Backpacks.cs");
+
+                // GitHub: MetalicRust repository.
+                // Эти три файла сейчас отсутствуют в репозитории qwrwetqa/MetalicRust-Plugins.
+                // Не делаем бессмысленные HTTP 404 на каждом цикле.
+                AddGitHub(list, "InfoMenu", "InfoMenu.cs", "InfoMenu.cs", true);
+                AddGitHub(list, "MetalicRust", "MetalicRust.cs", "MetalicRust.cs", false);
+                AddGitHub(list, "MetalicRustRemoveStarterItems", "MetalicRustRemoveStarterItems.cs", "MetalicRustRemoveStarterItems.cs", true);
+                AddGitHub(list, "MetalicRustReportSystem", "MetalicRustReportSystem.cs", "MetalicRustReportSystem.cs", true);
+                AddGitHub(list, "MetalicRustStreamerRewards", "MetalicRustStreamerRewards.cs", "MetalicRustStreamerRewards.cs", false);
+                AddGitHub(list, "MetalicRust TopTime", "MetalicRustTopTime.cs", "MetalicRustTopTime.cs", false);
+                AddGitHub(list, "Quick Smelt", "QuickSmelt.cs", "QuickSmelt.cs", false);
+                AddGitHub(list, "MetalicRustAutoUpdater", "MetalicRustAutoUpdater.cs", "MetalicRustAutoUpdater.cs", true);
+
+                // Raidable Bases намеренно не обновляется автоматически:
+                // автор плагина прямо запрещает auto-updaters для этого плагина.
+                // Он может быть добавлен вручную в конфиг как Protected=true, но здесь
+                // специально отсутствует, чтобы updater никогда не трогал его.
+
+                return list;
+            }
+
+            private static void AddUmod(List<PluginEntry> list, string name, string slug, string fileName)
+            {
+                list.Add(new PluginEntry(name, "uMod", slug, null, fileName, true, false));
+            }
+
+            private static void AddGitHub(List<PluginEntry> list, string name, string fileName, string githubFile, bool protectedPlugin)
+            {
+                list.Add(new PluginEntry(name, "GitHub", null, githubFile, fileName, !protectedPlugin, protectedPlugin));
+            }
         }
 
         protected override void LoadDefaultConfig()
@@ -110,27 +178,51 @@ namespace Oxide.Plugins
             try
             {
                 config = Config.ReadObject<Configuration>();
-
                 if (config == null)
                     throw new Exception("Configuration is null.");
             }
             catch (Exception ex)
             {
-                PrintWarning(
-                    "[Config] Ошибка конфигурации: " +
-                    ex.Message
-                );
-
+                PrintWarning("[AutoUpdater] Ошибка config: " + ex.Message);
                 LoadDefaultConfig();
+                return;
             }
 
-            if (config.UModPlugins == null)
-                config.UModPlugins = new Dictionary<string, string>();
+            // Канонизируем список: старые конфиги могли содержать 76/141 устаревших записей.
+            // Сохраняем настройки существующих записей, но оставляем только актуальный список 37 плагинов.
+            List<PluginEntry> defaults = Configuration.DefaultPlugins();
+            Dictionary<string, PluginEntry> oldEntries = (config.Plugins ?? new List<PluginEntry>())
+                .Where(x => x != null && !string.IsNullOrEmpty(x.Name))
+                .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Last(), StringComparer.OrdinalIgnoreCase);
 
-            if (config.ProtectedPlugins == null)
-                config.ProtectedPlugins = new List<string>();
+            foreach (PluginEntry entry in defaults)
+            {
+                PluginEntry old;
+                if (oldEntries.TryGetValue(entry.Name, out old))
+                {
+                    entry.AutoUpdate = old.AutoUpdate;
+                    entry.Protected = entry.Protected || old.Protected;
+                }
+            }
 
+            config.Plugins = defaults;
             SaveConfig();
+        }
+
+        private bool IsAllowedEntry(PluginEntry e)
+        {
+            if (e == null || string.IsNullOrEmpty(e.Name))
+                return false;
+
+            if (!string.Equals(e.Source, "uMod", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(e.Source, "GitHub", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (string.Equals(e.Name, "RaidableBases", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return true;
         }
 
         protected override void SaveConfig()
@@ -140,32 +232,757 @@ namespace Oxide.Plugins
 
         #endregion
 
-        #region Variables
+        #region Hooks
 
-        private Timer updateTimer;
+        private void Init()
+        {
+            LoadConfig();
 
-        private readonly Dictionary<string, PluginStatus> statuses =
-            new Dictionary<string, PluginStatus>(
-                StringComparer.OrdinalIgnoreCase
-            );
+            PrintWarning("================================================");
+            PrintWarning("MetalicRust AutoUpdater 3.0.1");
+            PrintWarning("Разрешённые источники: ТОЛЬКО uMod + GitHub");
+            PrintWarning("Плагинов в автообновлении: " + config.Plugins.Count);
+            PrintWarning("Автообновление: " + (config.AutoUpdate ? "ВКЛ" : "ВЫКЛ"));
+            PrintWarning("================================================");
+        }
 
-        private readonly HashSet<string> updatingPlugins =
-            new HashSet<string>(
-                StringComparer.OrdinalIgnoreCase
-            );
+        private void OnServerInitialized()
+        {
+            if (initializedOnce)
+                return;
+
+            initializedOnce = true;
+
+            if (updateTimer != null)
+                updateTimer.Destroy();
+
+            updateTimer = timer.Every(Mathf.Max(5f, config.CheckIntervalMinutes) * 60f, delegate
+            {
+                CheckAll(config.AutoUpdate);
+            });
+
+            timer.Once(Mathf.Max(5f, config.InitialCheckDelay), delegate
+            {
+                if (!checkRunning)
+                    CheckAll(config.AutoUpdate);
+            });
+        }
+
+        private void Unload()
+        {
+            if (updateTimer != null)
+                updateTimer.Destroy();
+
+            updateTimer = null;
+            checkRunning = false;
+            initializedOnce = false;
+            updating.Clear();
+            sourceCooldowns.Clear();
+        }
+
+        #endregion
+
+        #region Console
+
+        [ConsoleCommand("mrupdate")]
+        private void CmdMrUpdate(ConsoleSystem.Arg arg)
+        {
+            string command = arg == null ? "status" : arg.GetString(0, "status").ToLowerInvariant();
+
+            switch (command)
+            {
+                case "check":
+                    CheckAll(config.AutoUpdate);
+                    break;
+
+                case "update":
+                    CheckAll(true);
+                    break;
+
+                case "scan":
+                    CheckAll(false);
+                    break;
+
+                case "status":
+                    PrintStatus();
+                    break;
+
+                case "local":
+                    PrintLocal();
+                    break;
+
+                case "on":
+                    config.AutoUpdate = true;
+                    SaveConfig();
+                    Puts("[AutoUpdater] Автообновление ВКЛ.");
+                    break;
+
+                case "off":
+                    config.AutoUpdate = false;
+                    SaveConfig();
+                    Puts("[AutoUpdater] Автообновление ВЫКЛ.");
+                    break;
+
+                default:
+                    Puts("mrupdate check   - проверка + обновление, если автообновление ВКЛ");
+                    Puts("mrupdate update  - принудительная проверка + обновление");
+                    Puts("mrupdate scan    - только проверка без установки");
+                    Puts("mrupdate status  - статус");
+                    Puts("mrupdate local   - локальные версии");
+                    Puts("mrupdate on      - автообновление ВКЛ");
+                    Puts("mrupdate off     - автообновление ВЫКЛ");
+                    break;
+            }
+        }
+
+        #endregion
+
+        #region Check queue
+
+        private void CheckAll(bool doUpdate)
+        {
+            if (checkRunning)
+                return;
+
+            checkRunning = true;
+            statuses.Clear();
+
+            List<PluginEntry> entries = config.Plugins
+                .Where(x => x != null && IsAllowedEntry(x))
+                .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+
+            Puts("[AutoUpdater] ===============================================");
+            Puts("[AutoUpdater] Проверка " + entries.Count + " плагинов.");
+            Puts("[AutoUpdater] Источники: только uMod / GitHub.");
+            Puts("[AutoUpdater] Очередь запросов: 1 за раз, защита от 404/429.");
+            Puts("[AutoUpdater] ===============================================");
+
+            ProcessEntry(entries, 0, doUpdate);
+        }
+
+        private void ProcessEntry(List<PluginEntry> entries, int index, bool doUpdate)
+        {
+            if (index >= entries.Count)
+            {
+                FinishCheck();
+                return;
+            }
+
+            PluginEntry entry = entries[index];
+
+            if (entry.Protected)
+            {
+                string localProtected = GetLocalVersion(entry);
+                SetStatus(entry.Name, entry.Source, localProtected, null, null, VersionState.Protected, "Защищён");
+                ScheduleNext(entries, index + 1, doUpdate);
+                return;
+            }
+
+            if (!entry.AutoUpdate && doUpdate)
+            {
+                SetStatus(entry.Name, entry.Source, GetLocalVersion(entry), null, null, VersionState.Protected, "Автообновление отключено");
+                ScheduleNext(entries, index + 1, doUpdate);
+                return;
+            }
+
+            if (string.Equals(entry.Source, "uMod", StringComparison.OrdinalIgnoreCase))
+                CheckUmod(entry, entries, index, doUpdate);
+            else
+                CheckGitHub(entry, entries, index, doUpdate);
+        }
+
+        private void ScheduleNext(List<PluginEntry> entries, int nextIndex, bool doUpdate)
+        {
+            timer.Once(Mathf.Max(0.1f, config.RequestDelay), delegate
+            {
+                ProcessEntry(entries, nextIndex, doUpdate);
+            });
+        }
+
+        private void FinishCheck()
+        {
+            checkRunning = false;
+
+            int updates = statuses.Values.Count(x => x.State == VersionState.UpdateAvailable);
+            int updated = statuses.Values.Count(x => x.State == VersionState.Updated);
+
+            Puts("[AutoUpdater] ===============================================");
+            Puts("[AutoUpdater] ПРОВЕРКА ЗАВЕРШЕНА");
+            Puts("[AutoUpdater] Доступно обновлений: " + updates);
+            Puts("[AutoUpdater] Обновлено сейчас: " + updated);
+            Puts("[AutoUpdater] ===============================================");
+        }
+
+        #endregion
+
+        #region uMod
+
+        private void CheckUmod(PluginEntry entry, List<PluginEntry> entries, int index, bool doUpdate)
+        {
+            string localVersion = GetLocalVersion(entry);
+            string url = "https://umod.org/plugins/" + entry.Slug + "/latest.json";
+
+            Puts("[uMod] Проверка: " + entry.Name + " | local=" + localVersion);
+
+            if (IsSourceCoolingDown(entry.Name))
+            {
+                SetStatus(entry.Name, "uMod", localVersion, null, null, VersionState.Cooldown, "Пропуск после предыдущего HTTP 404/429");
+                ScheduleNext(entries, index + 1, doUpdate);
+                return;
+            }
+
+            GetWithRetry(url, config.NetworkRetries, delegate(int code, string response)
+            {
+                if (code != 200 || string.IsNullOrEmpty(response))
+                {
+                    VersionState state = code == 404 ? VersionState.NotFound : (code == 429 ? VersionState.RateLimited : VersionState.NetworkError);
+                    string message = "HTTP " + code;
+                    SetStatus(entry.Name, "uMod", localVersion, null, null, state, message);
+                    Warn("[uMod] " + entry.Name + " | " + message);
+                    if (code == 404 || code == 429)
+                        SetSourceCooldown(entry.Name, code == 404 ? config.NotFoundCooldownMinutes : config.RateLimitRetryDelay / 60f);
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                LatestPluginInfo latest;
+                try
+                {
+                    latest = JsonConvert.DeserializeObject<LatestPluginInfo>(response);
+                }
+                catch (Exception ex)
+                {
+                    SetStatus(entry.Name, "uMod", localVersion, null, null, VersionState.NetworkError, "JSON: " + ex.Message);
+                    Warn("[uMod] " + entry.Name + " | JSON ошибка.");
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                if (latest == null || string.IsNullOrEmpty(latest.version))
+                {
+                    SetStatus(entry.Name, "uMod", localVersion, null, null, VersionState.NetworkError, "Версия отсутствует");
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                string remoteVersion = latest.version;
+                int cmp = CompareVersions(localVersion, remoteVersion);
+
+                if (cmp == 0)
+                {
+                    SetStatus(entry.Name, "uMod", localVersion, remoteVersion, remoteVersion, VersionState.UpToDate, null);
+                    Puts("[uMod] " + entry.Name + " | " + localVersion + " = " + remoteVersion + " | OK");
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                if (cmp > 0)
+                {
+                    SetStatus(entry.Name, "uMod", localVersion, remoteVersion, remoteVersion, VersionState.FileNewer, "Локальная версия новее");
+                    Warn("[uMod] " + entry.Name + " | local=" + localVersion + " > remote=" + remoteVersion + " | DOWNGRADE запрещён");
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                SetStatus(entry.Name, "uMod", localVersion, remoteVersion, remoteVersion, VersionState.UpdateAvailable, null);
+                Puts("[uMod] " + entry.Name + " | UPDATE: " + localVersion + " -> " + remoteVersion);
+
+                if (!doUpdate)
+                {
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                string downloadUrl = latest.download_url;
+                if (string.IsNullOrEmpty(downloadUrl))
+                    downloadUrl = latest.download;
+
+                if (string.IsNullOrEmpty(downloadUrl))
+                {
+                    SetStatus(entry.Name, "uMod", localVersion, remoteVersion, remoteVersion, VersionState.NetworkError, "download_url отсутствует");
+                    Warn("[uMod] " + entry.Name + " | download_url отсутствует");
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                timer.Once(Mathf.Max(1f, config.UpdateDelay), delegate
+                {
+                    DownloadAndInstall(entry, downloadUrl, remoteVersion, "uMod", null, delegate
+                    {
+                        ScheduleNext(entries, index + 1, doUpdate);
+                    });
+                });
+            });
+        }
+
+        #endregion
+
+        #region GitHub
+
+        private void CheckGitHub(PluginEntry entry, List<PluginEntry> entries, int index, bool doUpdate)
+        {
+            string localVersion = GetLocalVersion(entry);
+            string fileName = string.IsNullOrEmpty(entry.GitHubFile) ? entry.FileName : entry.GitHubFile;
+            string url = config.GitHubBaseUrl.TrimEnd('/') + "/" + fileName;
+
+            Puts("[GitHub] Проверка: " + entry.Name + " | local=" + localVersion + " | file=" + fileName);
+
+            if (IsSourceCoolingDown(entry.Name))
+            {
+                SetStatus(entry.Name, "GitHub", localVersion, null, null, VersionState.Cooldown, "Пропуск после предыдущего HTTP 404/429");
+                ScheduleNext(entries, index + 1, doUpdate);
+                return;
+            }
+
+            // versions.json здесь НЕ используется.
+            // Версия берётся прямо из [Info(...)] удалённого .cs,
+            // поэтому старый manifest никогда не сможет откатить InfoMenu.
+            GetWithRetry(url, config.NetworkRetries, delegate(int code, string source)
+            {
+                if (code != 200 || string.IsNullOrEmpty(source))
+                {
+                    VersionState state = code == 404 ? VersionState.NotFound : (code == 429 ? VersionState.RateLimited : VersionState.NetworkError);
+                    string message = "HTTP " + code;
+                    SetStatus(entry.Name, "GitHub", localVersion, null, null, state, message);
+                    Warn("[GitHub] " + entry.Name + " | " + message);
+                    if (code == 404 || code == 429)
+                        SetSourceCooldown(entry.Name, code == 404 ? config.NotFoundCooldownMinutes : config.RateLimitRetryDelay / 60f);
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                string remoteVersion = ExtractInfoVersion(source);
+
+                if (string.IsNullOrEmpty(remoteVersion))
+                {
+                    SetStatus(entry.Name, "GitHub", localVersion, null, null, VersionState.NetworkError, "В .cs нет [Info(...)]");
+                    Warn("[GitHub] " + entry.Name + " | версия в .cs не найдена");
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                int cmp = CompareVersions(localVersion, remoteVersion);
+
+                if (cmp == 0)
+                {
+                    SetStatus(entry.Name, "GitHub", localVersion, remoteVersion, remoteVersion, VersionState.UpToDate, null);
+                    Puts("[GitHub] " + entry.Name + " | " + localVersion + " = " + remoteVersion + " | OK");
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                if (cmp > 0)
+                {
+                    SetStatus(entry.Name, "GitHub", localVersion, remoteVersion, remoteVersion, VersionState.FileNewer, "Локальная версия новее");
+                    Warn("[GitHub] " + entry.Name + " | local=" + localVersion + " > remote=" + remoteVersion + " | DOWNGRADE запрещён");
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                SetStatus(entry.Name, "GitHub", localVersion, remoteVersion, remoteVersion, VersionState.UpdateAvailable, null);
+                Puts("[GitHub] " + entry.Name + " | UPDATE: " + localVersion + " -> " + remoteVersion);
+
+                if (!doUpdate)
+                {
+                    ScheduleNext(entries, index + 1, doUpdate);
+                    return;
+                }
+
+                timer.Once(Mathf.Max(1f, config.UpdateDelay), delegate
+                {
+                    DownloadAndInstall(entry, url, remoteVersion, "GitHub", source, delegate
+                    {
+                        ScheduleNext(entries, index + 1, doUpdate);
+                    });
+                });
+            });
+        }
+
+        #endregion
+
+        #region Install
+
+        private void DownloadAndInstall(PluginEntry entry, string url, string expectedVersion, string sourceType, string alreadyDownloaded, Action finished)
+        {
+            if (updating.Contains(entry.Name))
+            {
+                finished();
+                return;
+            }
+
+            updating.Add(entry.Name);
+
+            Action<string> install = delegate(string source)
+            {
+                try
+                {
+                    string filePath = FindPluginFile(entry);
+
+                    if (string.IsNullOrEmpty(filePath))
+                    {
+                        SetStatus(entry.Name, sourceType, "?", expectedVersion, expectedVersion, VersionState.NotLoaded, "Локальный .cs файл не найден");
+                        PrintError("[" + sourceType + "] " + entry.Name + " | .cs не найден: " + entry.FileName);
+                        updating.Remove(entry.Name);
+                        finished();
+                        return;
+                    }
+
+                    string downloadedVersion = ExtractInfoVersion(source);
+
+                    if (string.IsNullOrEmpty(downloadedVersion))
+                    {
+                        PrintError("[" + sourceType + "] " + entry.Name + " | версия в скачанном файле не найдена");
+                        updating.Remove(entry.Name);
+                        finished();
+                        return;
+                    }
+
+                    if (CompareVersions(downloadedVersion, expectedVersion) != 0)
+                    {
+                        PrintError("[" + sourceType + "] " + entry.Name + " | ожидалась " + expectedVersion + ", скачано " + downloadedVersion);
+                        updating.Remove(entry.Name);
+                        finished();
+                        return;
+                    }
+
+                    string localVersion = ExtractInfoVersion(File.ReadAllText(filePath));
+                    if (string.IsNullOrEmpty(localVersion))
+                        localVersion = "0.0.0";
+
+                    if (CompareVersions(downloadedVersion, localVersion) <= 0)
+                    {
+                        Warn("[" + sourceType + "] " + entry.Name + " | downgrade/повтор запрещён: local=" + localVersion + ", remote=" + downloadedVersion);
+                        updating.Remove(entry.Name);
+                        finished();
+                        return;
+                    }
+
+                    string backupPath = filePath + ".bak";
+                    if (config.CreateBackup)
+                        File.Copy(filePath, backupPath, true);
+
+                    // Всегда unload перед записью, чтобы старый экземпляр не оставался в памяти.
+                    ConsoleSystem.Run(ConsoleSystem.Option.Server.Quiet(), "oxide.unload \"" + entry.Name + "\"");
+
+                    File.WriteAllText(filePath, source);
+
+                    ConsoleSystem.Run(ConsoleSystem.Option.Server.Quiet(), "oxide.load \"" + entry.Name + "\"");
+
+                    UpdateOperation op = new UpdateOperation
+                    {
+                        PluginName = entry.Name,
+                        FilePath = filePath,
+                        BackupPath = backupPath,
+                        ExpectedVersion = downloadedVersion,
+                        SourceType = sourceType
+                    };
+
+                    if (config.VerifyAfterReload)
+                    {
+                        timer.Once(Mathf.Max(1f, config.VerifyDelay), delegate
+                        {
+                            VerifyUpdate(op, finished);
+                        });
+                    }
+                    else
+                    {
+                        CompleteUpdate(op);
+                        finished();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    PrintError("[" + sourceType + "] " + entry.Name + " | установка: " + ex.Message);
+                    updating.Remove(entry.Name);
+                    finished();
+                }
+            };
+
+            if (!string.IsNullOrEmpty(alreadyDownloaded))
+            {
+                install(alreadyDownloaded);
+                return;
+            }
+
+            GetWithRetry(url, config.NetworkRetries, delegate(int code, string response)
+            {
+                if (code != 200 || string.IsNullOrEmpty(response))
+                {
+                    if (code == 429)
+                    {
+                        SetStatus(entry.Name, sourceType, GetLocalVersion(entry), expectedVersion, expectedVersion, VersionState.RateLimited, "HTTP 429 — uMod ограничил скачивание; повтор позже");
+                        Warn("[" + sourceType + "] " + entry.Name + " | HTTP 429 — повтор будет в следующем цикле");
+                        SetSourceCooldown(entry.Name, config.RateLimitRetryDelay / 60f);
+                    }
+                    else
+                    {
+                        PrintError("[" + sourceType + "] " + entry.Name + " | скачивание HTTP " + code);
+                    }
+
+                    updating.Remove(entry.Name);
+                    finished();
+                    return;
+                }
+
+                install(response);
+            });
+        }
+
+        private void VerifyUpdate(UpdateOperation op, Action finished)
+        {
+            string filePath = op.FilePath;
+
+            try
+            {
+                if (!File.Exists(filePath))
+                    throw new Exception("Файл после обновления отсутствует");
+
+                string source = File.ReadAllText(filePath);
+                string loadedVersionFromFile = ExtractInfoVersion(source);
+
+                if (string.IsNullOrEmpty(loadedVersionFromFile) ||
+                    CompareVersions(loadedVersionFromFile, op.ExpectedVersion) != 0)
+                    throw new Exception("Версия файла не совпадает: " + loadedVersionFromFile);
+
+                Plugin loaded = FindLoadedPlugin(op.PluginName);
+
+                if (loaded == null)
+                    throw new Exception("Плагин не загрузился после reload");
+
+                string loadedVersion = GetPluginVersion(loaded);
+
+                if (CompareVersions(loadedVersion, op.ExpectedVersion) != 0)
+                    throw new Exception("Загружена версия " + loadedVersion + ", ожидалась " + op.ExpectedVersion);
+
+                CompleteUpdate(op);
+                finished();
+            }
+            catch (Exception ex)
+            {
+                PrintError("[VERIFY] " + op.PluginName + " | " + ex.Message);
+
+                if (config.RollbackOnError)
+                    Rollback(op, finished);
+                else
+                {
+                    updating.Remove(op.PluginName);
+                    finished();
+                }
+            }
+        }
+
+        private void CompleteUpdate(UpdateOperation op)
+        {
+            updating.Remove(op.PluginName);
+
+            SetStatus(op.PluginName, op.SourceType, op.ExpectedVersion, op.ExpectedVersion, op.ExpectedVersion, VersionState.Updated, null);
+
+            Puts("[" + op.SourceType + "] " + op.PluginName + " | УСПЕШНО ОБНОВЛЁН до " + op.ExpectedVersion);
+            NotifyAdmin(op.PluginName + " обновлён до " + op.ExpectedVersion);
+        }
+
+        private void Rollback(UpdateOperation op, Action finished)
+        {
+            try
+            {
+                ConsoleSystem.Run(ConsoleSystem.Option.Server.Quiet(), "oxide.unload \"" + op.PluginName + "\"");
+
+                if (!File.Exists(op.BackupPath))
+                    throw new Exception(".bak не найден");
+
+                File.Copy(op.BackupPath, op.FilePath, true);
+                ConsoleSystem.Run(ConsoleSystem.Option.Server.Quiet(), "oxide.load \"" + op.PluginName + "\"");
+
+                SetStatus(op.PluginName, op.SourceType, null, op.ExpectedVersion, op.ExpectedVersion, VersionState.Rollback, "Автоматический откат");
+
+                NotifyAdmin(op.PluginName + " — ошибка обновления, выполнен откат.");
+            }
+            catch (Exception ex)
+            {
+                PrintError("[ROLLBACK] " + op.PluginName + " | " + ex.Message);
+            }
+
+            updating.Remove(op.PluginName);
+            finished();
+        }
+
+        #endregion
+
+        #region Network
+
+        private void GetWithRetry(string url, int retries, Action<int, string> callback)
+        {
+            EnqueueAttempt(url, Mathf.Max(1, retries), callback, 0);
+        }
+
+        private void EnqueueAttempt(string url, int remaining, Action<int, string> callback, int attempt)
+        {
+            webrequest.EnqueueGet(url, delegate(int code, string response)
+            {
+                if (code == 200 && !string.IsNullOrEmpty(response))
+                {
+                    callback(code, response);
+                    return;
+                }
+
+                // 404 — ресурс реально отсутствует. Повторять бессмысленно.
+                if (code == 404)
+                {
+                    callback(code, response);
+                    return;
+                }
+
+                // 429 — сервер ограничил частоту. Не спамим uMod повторными запросами.
+                if (code == 429)
+                {
+                    if (remaining <= 1)
+                    {
+                        callback(code, response);
+                        return;
+                    }
+
+                    float delay429 = Mathf.Max(30f, config.RateLimitRetryDelay);
+                    Warn("[Network] HTTP 429 | повтор через " + delay429 + " сек.");
+                    timer.Once(delay429, delegate
+                    {
+                        EnqueueAttempt(url, remaining - 1, callback, attempt + 1);
+                    });
+                    return;
+                }
+
+                // Сетевые/5xx ошибки повторяем с увеличением интервала.
+                if (remaining <= 1)
+                {
+                    callback(code, response);
+                    return;
+                }
+
+                float delay = Mathf.Min(
+                    Mathf.Max(2f, config.NetworkRetryDelay) * Mathf.Pow(2f, attempt),
+                    60f
+                );
+
+                Warn("[Network] HTTP " + code + " | повтор через " + delay + " сек.");
+                timer.Once(delay, delegate
+                {
+                    EnqueueAttempt(url, remaining - 1, callback, attempt + 1);
+                });
+            }, this);
+        }
+
+        private bool IsSourceCoolingDown(string key)
+        {
+            DateTime until;
+            if (!sourceCooldowns.TryGetValue(key, out until))
+                return false;
+
+            if (DateTime.UtcNow >= until)
+            {
+                sourceCooldowns.Remove(key);
+                return false;
+            }
+
+            return true;
+        }
+
+        private void SetSourceCooldown(string key, float minutes)
+        {
+            sourceCooldowns[key] = DateTime.UtcNow.AddMinutes(Mathf.Max(1f, minutes));
+        }
+
+        #endregion
+
+        #region Local files
+
+        private string FindPluginFile(PluginEntry entry)
+        {
+            string directory = Interface.Oxide.PluginDirectory;
+
+            if (!string.IsNullOrEmpty(entry.FileName))
+            {
+                string exact = Path.Combine(directory, entry.FileName);
+                if (File.Exists(exact))
+                    return exact;
+
+                string caseInsensitive = Directory.GetFiles(directory, "*.cs")
+                    .FirstOrDefault(x => Path.GetFileName(x).Equals(entry.FileName, StringComparison.OrdinalIgnoreCase));
+
+                if (!string.IsNullOrEmpty(caseInsensitive))
+                    return caseInsensitive;
+            }
+
+            string byName = Path.Combine(directory, entry.Name + ".cs");
+            if (File.Exists(byName))
+                return byName;
+
+            return Directory.GetFiles(directory, "*.cs")
+                .FirstOrDefault(x => Path.GetFileNameWithoutExtension(x).Equals(entry.Name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private string GetLocalVersion(PluginEntry entry)
+        {
+            string file = FindPluginFile(entry);
+
+            if (!string.IsNullOrEmpty(file))
+            {
+                try
+                {
+                    string version = ExtractInfoVersion(File.ReadAllText(file));
+                    if (!string.IsNullOrEmpty(version))
+                        return version;
+                }
+                catch { }
+            }
+
+            Plugin loaded = FindLoadedPlugin(entry.Name);
+            return loaded == null ? "0.0.0" : GetPluginVersion(loaded);
+        }
+
+        private Plugin FindLoadedPlugin(string name)
+        {
+            Plugin plugin = plugins.Find(name);
+            if (plugin != null)
+                return plugin;
+
+            foreach (Plugin p in plugins.GetAll())
+            {
+                if (p == null)
+                    continue;
+
+                if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                    return p;
+
+                if (!string.IsNullOrEmpty(p.Title) && string.Equals(p.Title, name, StringComparison.OrdinalIgnoreCase))
+                    return p;
+            }
+
+            return null;
+        }
+
+        private void PrintLocal()
+        {
+            Puts("========== LOCAL VERSIONS ==========");
+
+            foreach (PluginEntry entry in config.Plugins)
+                Puts(entry.Name + " | " + entry.Source + " | " + GetLocalVersion(entry));
+
+            Puts("====================================");
+        }
+
+        #endregion
+
+        #region Status
 
         private class PluginStatus
         {
             public string Name;
             public string Source;
-
-            public string CurrentVersion;
-            public string ManifestVersion;
-            public string RemoteVersion;
-
+            public string Current;
+            public string Remote;
             public VersionState State;
-
-            public string ErrorMessage;
+            public string Error;
         }
 
         private enum VersionState
@@ -173,2233 +990,152 @@ namespace Oxide.Plugins
             Unknown,
             UpToDate,
             UpdateAvailable,
-            ManifestNewer,
             FileNewer,
-            Mismatch,
             NetworkError,
+            RateLimited,
+            NotFound,
+            Cooldown,
             NotLoaded,
             Protected,
-            InvalidSource,
             Updated,
             Rollback
         }
 
-        private class GitHubManifest
+        private void SetStatus(string name, string source, string current, string manifest, string remote, VersionState state, string error)
         {
-            public Dictionary<string, string> Versions =
-                new Dictionary<string, string>(
-                    StringComparer.OrdinalIgnoreCase
-                );
-        }
-
-        private class UpdateOperation
-        {
-            public string PluginName;
-            public string FilePath;
-            public string BackupPath;
-            public string ExpectedVersion;
-            public string DownloadedVersion;
-            public string Source;
-            public string SourceType;
-        }
-
-        #endregion
-
-        #region Oxide Hooks
-
-        private void Init()
-        {
-            LoadConfig();
-
-            PrintWarning(
-                "=============================================="
-            );
-
-            PrintWarning(
-                "MetalicRust AutoUpdater 2.1.0"
-            );
-
-            PrintWarning(
-                "Автообновление: " +
-                (
-                    config.AutoUpdate
-                        ? "ВКЛЮЧЕНО"
-                        : "ВЫКЛЮЧЕНО"
-                )
-            );
-
-            PrintWarning(
-                "Проверка каждые: " +
-                config.CheckIntervalMinutes +
-                " минут"
-            );
-
-            PrintWarning(
-                "GitHub: " +
-                config.GitHubVersionsUrl
-            );
-
-            PrintWarning(
-                "=============================================="
-            );
-        }
-
-        private void OnServerInitialized()
-        {
-            float interval =
-                Mathf.Max(
-                    5f,
-                    config.CheckIntervalMinutes
-                );
-
-            updateTimer = timer.Every(
-                interval * 60f,
-                delegate
-                {
-                    CheckAllPlugins(
-                        config.AutoUpdate
-                    );
-                }
-            );
-
-            timer.Once(
-                Mathf.Max(
-                    5f,
-                    config.InitialCheckDelay
-                ),
-                delegate
-                {
-                    CheckAllPlugins(false);
-                }
-            );
-        }
-
-        private void Unload()
-        {
-            if (updateTimer != null)
-                updateTimer.Destroy();
-        }
-
-        #endregion
-
-        #region Console Commands
-
-        [ConsoleCommand("mrupdate")]
-        private void ConsoleCommand(
-            ConsoleSystem.Arg arg
-        )
-        {
-            if (arg == null)
-                return;
-
-            string command =
-                arg.GetString(
-                    0,
-                    "status"
-                ).ToLower();
-
-            switch (command)
+            PluginStatus s;
+            if (!statuses.TryGetValue(name, out s))
             {
-                case "check":
-
-                    Puts(
-                        "[AutoUpdater] Запущена проверка."
-                    );
-
-                    CheckAllPlugins(false);
-
-                    break;
-
-                case "update":
-
-                    Puts(
-                        "[AutoUpdater] Запущена проверка с автообновлением."
-                    );
-
-                    CheckAllPlugins(true);
-
-                    break;
-
-                case "status":
-
-                    PrintStatus();
-
-                    break;
-
-                case "local":
-
-                    PrintLocalPlugins();
-
-                    break;
-
-                case "protected":
-
-                    PrintProtected();
-
-                    break;
-
-                case "on":
-
-                    config.AutoUpdate = true;
-                    SaveConfig();
-
-                    Puts(
-                        "[AutoUpdater] Автообновление ВКЛЮЧЕНО."
-                    );
-
-                    break;
-
-                case "off":
-
-                    config.AutoUpdate = false;
-                    SaveConfig();
-
-                    Puts(
-                        "[AutoUpdater] Автообновление ВЫКЛЮЧЕНО."
-                    );
-
-                    break;
-
-                default:
-
-                    Puts(
-                        "========== MetalicRust AutoUpdater =========="
-                    );
-
-                    Puts(
-                        "mrupdate check      - проверить"
-                    );
-
-                    Puts(
-                        "mrupdate update     - проверить и обновить"
-                    );
-
-                    Puts(
-                        "mrupdate status     - статус"
-                    );
-
-                    Puts(
-                        "mrupdate local      - локальные плагины"
-                    );
-
-                    Puts(
-                        "mrupdate protected  - защищённые"
-                    );
-
-                    Puts(
-                        "mrupdate on         - автообновление ВКЛ"
-                    );
-
-                    Puts(
-                        "mrupdate off        - автообновление ВЫКЛ"
-                    );
-
-                    Puts(
-                        "============================================"
-                    );
-
-                    break;
-            }
-        }
-
-        #endregion
-
-        #region Main Check
-
-        private void CheckAllPlugins(bool update)
-        {
-            Puts(
-                "[AutoUpdater] =========================================="
-            );
-
-            Puts(
-                "[AutoUpdater] Начинаю проверку плагинов..."
-            );
-
-            CheckUModPlugins(update);
-
-            DownloadGitHubManifest(
-                update
-            );
-        }
-
-        #endregion
-
-        #region uMod
-
-        private void CheckUModPlugins(bool update)
-        {
-            foreach (
-                KeyValuePair<string, string> entry
-                in config.UModPlugins
-            )
-            {
-                string configuredName =
-                    entry.Key;
-
-                string slug =
-                    entry.Value;
-
-                if (IsProtected(configuredName))
-                {
-                    SetStatus(
-                        configuredName,
-                        "uMod",
-                        null,
-                        null,
-                        null,
-                        VersionState.Protected,
-                        "Защищён"
-                    );
-
-                    continue;
-                }
-
-                Plugin plugin =
-                    plugins.Find(
-                        configuredName
-                    );
-
-                if (plugin == null)
-                {
-                    SetStatus(
-                        configuredName,
-                        "uMod",
-                        null,
-                        null,
-                        null,
-                        VersionState.NotLoaded,
-                        "Плагин не загружен"
-                    );
-
-                    Warn(
-                        "[uMod] " +
-                        configuredName +
-                        " | Плагин не загружен."
-                    );
-
-                    continue;
-                }
-
-                CheckUModPlugin(
-                    plugin,
-                    slug,
-                    update
-                );
-            }
-        }
-
-        private void CheckUModPlugin(
-            Plugin plugin,
-            string slug,
-            bool update
-        )
-        {
-            if (plugin == null)
-                return;
-
-            string pluginName =
-                plugin.Name;
-
-            string currentVersion =
-                GetPluginVersion(plugin);
-
-            string url =
-                "https://umod.org/plugins/" +
-                slug +
-                "/latest.json";
-
-            Puts(
-                "[uMod] Проверка: " +
-                pluginName +
-                " " +
-                currentVersion
-            );
-
-            EnqueueGetWithRetry(
-                url,
-                config.NetworkRetries,
-                delegate(
-                    int code,
-                    string response
-                )
-                {
-                    if (
-                        code != 200 ||
-                        string.IsNullOrEmpty(response)
-                    )
-                    {
-                        SetStatus(
-                            pluginName,
-                            "uMod",
-                            currentVersion,
-                            null,
-                            null,
-                            VersionState.NetworkError,
-                            "HTTP " + code
-                        );
-
-                        Warn(
-                            "[uMod] " +
-                            pluginName +
-                            " | HTTP " +
-                            code
-                        );
-
-                        return;
-                    }
-
-                    LatestPluginInfo latest;
-
-                    try
-                    {
-                        latest =
-                            JsonConvert.DeserializeObject<LatestPluginInfo>(
-                                response
-                            );
-                    }
-                    catch (Exception ex)
-                    {
-                        SetStatus(
-                            pluginName,
-                            "uMod",
-                            currentVersion,
-                            null,
-                            null,
-                            VersionState.NetworkError,
-                            ex.Message
-                        );
-
-                        Warn(
-                            "[uMod] " +
-                            pluginName +
-                            " | JSON ошибка: " +
-                            ex.Message
-                        );
-
-                        return;
-                    }
-
-                    if (
-                        latest == null ||
-                        string.IsNullOrEmpty(latest.version)
-                    )
-                    {
-                        SetStatus(
-                            pluginName,
-                            "uMod",
-                            currentVersion,
-                            null,
-                            null,
-                            VersionState.Unknown,
-                            "Версия отсутствует"
-                        );
-
-                        Warn(
-                            "[uMod] " +
-                            pluginName +
-                            " | Версия не найдена."
-                        );
-
-                        return;
-                    }
-
-                    string latestVersion =
-                        latest.version;
-
-                    int comparison =
-                        CompareVersions(
-                            currentVersion,
-                            latestVersion
-                        );
-
-                    if (comparison == 0)
-                    {
-                        SetStatus(
-                            pluginName,
-                            "uMod",
-                            currentVersion,
-                            latestVersion,
-                            latestVersion,
-                            VersionState.UpToDate,
-                            null
-                        );
-
-                        Puts(
-                            "[uMod] " +
-                            pluginName +
-                            " | " +
-                            currentVersion +
-                            " = " +
-                            latestVersion +
-                            " | OK"
-                        );
-
-                        return;
-                    }
-
-                    if (comparison > 0)
-                    {
-                        SetStatus(
-                            pluginName,
-                            "uMod",
-                            currentVersion,
-                            latestVersion,
-                            latestVersion,
-                            VersionState.FileNewer,
-                            "Локальная версия новее uMod"
-                        );
-
-                        Warn(
-                            "[uMod] " +
-                            pluginName +
-                            " | ЛОКАЛЬНАЯ ВЕРСИЯ НОВЕЕ: " +
-                            currentVersion +
-                            " > " +
-                            latestVersion +
-                            " | Обновление не требуется."
-                        );
-
-                        return;
-                    }
-
-                    SetStatus(
-                        pluginName,
-                        "uMod",
-                        currentVersion,
-                        latestVersion,
-                        latestVersion,
-                        VersionState.UpdateAvailable,
-                        null
-                    );
-
-                    Warn(
-                        "[uMod] ОБНОВЛЕНИЕ: " +
-                        pluginName +
-                        " | " +
-                        currentVersion +
-                        " -> " +
-                        latestVersion
-                    );
-
-                    NotifyAdmin(
-                        pluginName +
-                        " — uMod обновление " +
-                        currentVersion +
-                        " → " +
-                        latestVersion
-                    );
-
-                    if (!update)
-                        return;
-
-                    string downloadUrl =
-                        GetDownloadUrl(
-                            latest
-                        );
-
-                    if (string.IsNullOrEmpty(downloadUrl))
-                    {
-                        Warn(
-                            "[uMod] " +
-                            pluginName +
-                            " | URL скачивания отсутствует."
-                        );
-
-                        return;
-                    }
-
-                    timer.Once(
-                        Mathf.Max(
-                            1f,
-                            config.UpdateDelay
-                        ),
-                        delegate
-                        {
-                            DownloadUModPlugin(
-                                plugin,
-                                downloadUrl,
-                                latestVersion
-                            );
-                        }
-                    );
-                }
-            );
-        }
-
-        private void DownloadUModPlugin(
-            Plugin plugin,
-            string url,
-            string expectedVersion
-        )
-        {
-            if (plugin == null)
-                return;
-
-            string pluginName =
-                plugin.Name;
-
-            if (
-                updatingPlugins.Contains(
-                    pluginName
-                )
-            )
-                return;
-
-            updatingPlugins.Add(
-                pluginName
-            );
-
-            Puts(
-                "[uMod] Скачивание: " +
-                url
-            );
-
-            EnqueueGetWithRetry(
-                url,
-                config.NetworkRetries,
-                delegate(
-                    int code,
-                    string source
-                )
-                {
-                    if (
-                        code != 200 ||
-                        string.IsNullOrEmpty(source)
-                    )
-                    {
-                        updatingPlugins.Remove(
-                            pluginName
-                        );
-
-                        Warn(
-                            "[uMod] " +
-                            pluginName +
-                            " | Ошибка скачивания HTTP " +
-                            code
-                        );
-
-                        return;
-                    }
-
-                    string downloadedVersion =
-                        ExtractPluginVersion(
-                            source
-                        );
-
-                    Puts(
-                        "[uMod] " +
-                        pluginName +
-                        " | версия в скачанном файле: " +
-                        downloadedVersion
-                    );
-
-                    VersionCheckResult result =
-                        ValidateDownloadedVersion(
-                            pluginName,
-                            expectedVersion,
-                            downloadedVersion
-                        );
-
-                    if (
-                        result != VersionCheckResult.Ok
-                    )
-                    {
-                        updatingPlugins.Remove(
-                            pluginName
-                        );
-
-                        HandleVersionMismatch(
-                            pluginName,
-                            "uMod",
-                            expectedVersion,
-                            downloadedVersion,
-                            result
-                        );
-
-                        return;
-                    }
-
-                    UpdateOperation operation =
-                        PrepareOperation(
-                            pluginName,
-                            source,
-                            expectedVersion,
-                            downloadedVersion,
-                            "uMod"
-                        );
-
-                    InstallOperation(
-                        operation,
-                        plugin
-                    );
-                }
-            );
-        }
-
-        #endregion
-
-        #region GitHub
-
-        private void DownloadGitHubManifest(
-            bool update
-        )
-        {
-            Puts(
-                "[GitHub] Загрузка versions.json..."
-            );
-
-            EnqueueGetWithRetry(
-                config.GitHubVersionsUrl,
-                config.NetworkRetries,
-                delegate(
-                    int code,
-                    string response
-                )
-                {
-                    if (
-                        code != 200 ||
-                        string.IsNullOrEmpty(response)
-                    )
-                    {
-                        Warn(
-                            "[GitHub] versions.json | HTTP " +
-                            code
-                        );
-
-                        return;
-                    }
-
-                    Dictionary<string, string> versions;
-
-                    try
-                    {
-                        versions =
-                            JsonConvert.DeserializeObject<Dictionary<string, string>>(
-                                response
-                            );
-                    }
-                    catch (Exception ex)
-                    {
-                        Warn(
-                            "[GitHub] Ошибка versions.json: " +
-                            ex.Message
-                        );
-
-                        return;
-                    }
-
-                    if (
-                        versions == null ||
-                        versions.Count == 0
-                    )
-                    {
-                        Warn(
-                            "[GitHub] versions.json пустой."
-                        );
-
-                        return;
-                    }
-
-                    foreach (
-                        KeyValuePair<string, string> entry
-                        in versions
-                    )
-                    {
-                        CheckGitHubPlugin(
-                            entry.Key,
-                            entry.Value,
-                            update
-                        );
-                    }
-                }
-            );
-        }
-
-        private void CheckGitHubPlugin(
-            string pluginName,
-            string manifestVersion,
-            bool update
-        )
-        {
-            if (string.IsNullOrEmpty(pluginName))
-                return;
-
-            if (IsProtected(pluginName))
-            {
-                SetStatus(
-                    pluginName,
-                    "GitHub",
-                    null,
-                    manifestVersion,
-                    null,
-                    VersionState.Protected,
-                    "Защищён"
-                );
-
-                Puts(
-                    "[GitHub] Защищён: " +
-                    pluginName
-                );
-
-                return;
+                s = new PluginStatus();
+                statuses[name] = s;
             }
 
-            string url =
-                config.GitHubBaseUrl.TrimEnd('/') +
-                "/" +
-                pluginName +
-                ".cs";
-
-            Puts(
-                "[GitHub] Проверка: " +
-                pluginName +
-                " | manifest=" +
-                manifestVersion
-            );
-
-            string localPath =
-                FindPluginFile(
-                    pluginName
-                );
-
-            Plugin localPlugin =
-                plugins.Find(
-                    pluginName
-                );
-
-            string currentVersion =
-                localPlugin != null
-                    ? GetPluginVersion(localPlugin)
-                    : ExtractPluginVersionFromFile(
-                        localPath
-                    );
-
-            EnqueueGetWithRetry(
-                url,
-                config.NetworkRetries,
-                delegate(
-                    int code,
-                    string source
-                )
-                {
-                    if (
-                        code != 200 ||
-                        string.IsNullOrEmpty(source)
-                    )
-                    {
-                        SetStatus(
-                            pluginName,
-                            "GitHub",
-                            currentVersion,
-                            manifestVersion,
-                            null,
-                            VersionState.NetworkError,
-                            "HTTP " + code
-                        );
-
-                        Warn(
-                            "[GitHub] " +
-                            pluginName +
-                            " | HTTP " +
-                            code
-                        );
-
-                        return;
-                    }
-
-                    string fileVersion =
-                        ExtractPluginVersion(
-                            source
-                        );
-
-                    Puts(
-                        "[GitHub] " +
-                        pluginName +
-                        " | versions.json=" +
-                        manifestVersion +
-                        " | файл=" +
-                        fileVersion +
-                        " | локально=" +
-                        currentVersion
-                    );
-
-                    int manifestVsFile =
-                        CompareVersions(
-                            fileVersion,
-                            manifestVersion
-                        );
-
-                    /*
-                     * Файл GitHub старее, чем versions.json.
-                     *
-                     * Например:
-                     *
-                     * versions.json = 2.1.1
-                     * InfoMenu.cs   = 2.1.0
-                     *
-                     * Это НЕ обновление.
-                     */
-                    if (manifestVsFile < 0)
-                    {
-                        SetStatus(
-                            pluginName,
-                            "GitHub",
-                            currentVersion,
-                            manifestVersion,
-                            fileVersion,
-                            VersionState.ManifestNewer,
-                            "versions.json новее самого файла"
-                        );
-
-                        Warn(
-                            "[GitHub] " +
-                            pluginName +
-                            " | НЕСООТВЕТСТВИЕ ИСТОЧНИКА: " +
-                            "versions.json=" +
-                            manifestVersion +
-                            ", файл=" +
-                            fileVersion +
-                            " | Файл НЕ устанавливается."
-                        );
-
-                        NotifyAdmin(
-                            pluginName +
-                            " — ошибка GitHub: versions.json=" +
-                            manifestVersion +
-                            ", файл=" +
-                            fileVersion
-                        );
-
-                        return;
-                    }
-
-                    /*
-                     * Сам файл новее, чем versions.json.
-                     *
-                     * Это значит, что versions.json забыли обновить.
-                     */
-                    if (manifestVsFile > 0)
-                    {
-                        SetStatus(
-                            pluginName,
-                            "GitHub",
-                            currentVersion,
-                            manifestVersion,
-                            fileVersion,
-                            VersionState.FileNewer,
-                            "Файл новее versions.json"
-                        );
-
-                        Warn(
-                            "[GitHub] " +
-                            pluginName +
-                            " | ВНИМАНИЕ: файл " +
-                            fileVersion +
-                            " новее versions.json " +
-                            manifestVersion +
-                            " | Обновление отменено."
-                        );
-
-                        return;
-                    }
-
-                    /*
-                     * Теперь:
-                     *
-                     * файл == versions.json
-                     *
-                     * Источник считается корректным.
-                     */
-
-                    if (string.IsNullOrEmpty(currentVersion))
-                    {
-                        currentVersion = "0.0.0";
-                    }
-
-                    int localVsManifest =
-                        CompareVersions(
-                            currentVersion,
-                            manifestVersion
-                        );
-
-                    if (localVsManifest == 0)
-                    {
-                        SetStatus(
-                            pluginName,
-                            "GitHub",
-                            currentVersion,
-                            manifestVersion,
-                            fileVersion,
-                            VersionState.UpToDate,
-                            null
-                        );
-
-                        Puts(
-                            "[GitHub] " +
-                            pluginName +
-                            " | " +
-                            currentVersion +
-                            " = " +
-                            manifestVersion +
-                            " | OK"
-                        );
-
-                        return;
-                    }
-
-                    if (localVsManifest > 0)
-                    {
-                        SetStatus(
-                            pluginName,
-                            "GitHub",
-                            currentVersion,
-                            manifestVersion,
-                            fileVersion,
-                            VersionState.FileNewer,
-                            "Локальная версия новее manifest"
-                        );
-
-                        Warn(
-                            "[GitHub] " +
-                            pluginName +
-                            " | локальная версия " +
-                            currentVersion +
-                            " новее manifest " +
-                            manifestVersion +
-                            " | Откат не выполняется."
-                        );
-
-                        return;
-                    }
-
-                    SetStatus(
-                        pluginName,
-                        "GitHub",
-                        currentVersion,
-                        manifestVersion,
-                        fileVersion,
-                        VersionState.UpdateAvailable,
-                        null
-                    );
-
-                    Warn(
-                        "[GitHub] ОБНОВЛЕНИЕ: " +
-                        pluginName +
-                        " | " +
-                        currentVersion +
-                        " -> " +
-                        manifestVersion
-                    );
-
-                    NotifyAdmin(
-                        pluginName +
-                        " — GitHub обновление " +
-                        currentVersion +
-                        " → " +
-                        manifestVersion
-                    );
-
-                    if (!update)
-                        return;
-
-                    if (localPlugin == null)
-                    {
-                        Warn(
-                            "[GitHub] " +
-                            pluginName +
-                            " | локальный плагин не загружен. Автоустановка отменена."
-                        );
-
-                        return;
-                    }
-
-                    if (
-                        updatingPlugins.Contains(
-                            pluginName
-                        )
-                    )
-                        return;
-
-                    updatingPlugins.Add(
-                        pluginName
-                    );
-
-                    timer.Once(
-                        Mathf.Max(
-                            1f,
-                            config.UpdateDelay
-                        ),
-                        delegate
-                        {
-                            UpdateOperation operation =
-                                PrepareOperation(
-                                    pluginName,
-                                    source,
-                                    manifestVersion,
-                                    fileVersion,
-                                    "GitHub"
-                                );
-
-                            InstallOperation(
-                                operation,
-                                localPlugin
-                            );
-                        }
-                    );
-                }
-            );
-        }
-
-        #endregion
-
-        #region Version Validation
-
-        private enum VersionCheckResult
-        {
-            Ok,
-            DownloadedOlder,
-            DownloadedNewer,
-            Unknown
-        }
-
-        private VersionCheckResult ValidateDownloadedVersion(
-            string pluginName,
-            string expectedVersion,
-            string downloadedVersion
-        )
-        {
-            if (
-                string.IsNullOrEmpty(
-                    downloadedVersion
-                )
-            )
-            {
-                return VersionCheckResult.Unknown;
-            }
-
-            int comparison =
-                CompareVersions(
-                    downloadedVersion,
-                    expectedVersion
-                );
-
-            if (comparison == 0)
-                return VersionCheckResult.Ok;
-
-            if (comparison < 0)
-                return VersionCheckResult.DownloadedOlder;
-
-            return VersionCheckResult.DownloadedNewer;
-        }
-
-        private void HandleVersionMismatch(
-            string pluginName,
-            string sourceType,
-            string expectedVersion,
-            string downloadedVersion,
-            VersionCheckResult result
-        )
-        {
-            if (
-                result ==
-                VersionCheckResult.DownloadedOlder
-            )
-            {
-                Warn(
-                    "[" +
-                    sourceType +
-                    "] " +
-                    pluginName +
-                    " | СКАЧАННЫЙ ФАЙЛ СТАРШЕ/СТАРАЯ ВЕРСИЯ: " +
-                    "ожидалась " +
-                    expectedVersion +
-                    ", получена " +
-                    downloadedVersion +
-                    " | Обновление отменено."
-                );
-
-                return;
-            }
-
-            if (
-                result ==
-                VersionCheckResult.DownloadedNewer
-            )
-            {
-                Warn(
-                    "[" +
-                    sourceType +
-                    "] " +
-                    pluginName +
-                    " | СКАЧАННЫЙ ФАЙЛ НОВЕЕ ЗАЯВЛЕННОЙ ВЕРСИИ: " +
-                    "ожидалась " +
-                    expectedVersion +
-                    ", получена " +
-                    downloadedVersion +
-                    " | Обновление отменено."
-                );
-
-                return;
-            }
-
-            Warn(
-                "[" +
-                sourceType +
-                "] " +
-                pluginName +
-                " | НЕ УДАЛОСЬ ОПРЕДЕЛИТЬ ВЕРСИЮ ФАЙЛА | Обновление отменено."
-            );
-        }
-
-        private string ExtractPluginVersion(
-            string source
-        )
-        {
-            if (string.IsNullOrEmpty(source))
-                return null;
-
-            Match match =
-                Regex.Match(
-                    source,
-                    @"\[Info\s*\(\s*""[^""]+""\s*,\s*""[^""]+""\s*,\s*""([^""]+)""\s*\)\]",
-                    RegexOptions.IgnoreCase
-                );
-
-            if (
-                match.Success &&
-                match.Groups.Count > 1
-            )
-            {
-                return match.Groups[1].Value.Trim();
-            }
-
-            return null;
-        }
-
-        private string ExtractPluginVersionFromFile(
-            string path
-        )
-        {
-            if (
-                string.IsNullOrEmpty(path) ||
-                !File.Exists(path)
-            )
-                return null;
-
-            try
-            {
-                string source =
-                    File.ReadAllText(path);
-
-                return ExtractPluginVersion(
-                    source
-                );
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private int CompareVersions(
-            string left,
-            string right
-        )
-        {
-            int[] leftParts =
-                ParseVersion(left);
-
-            int[] rightParts =
-                ParseVersion(right);
-
-            int length =
-                Math.Max(
-                    leftParts.Length,
-                    rightParts.Length
-                );
-
-            for (int i = 0; i < length; i++)
-            {
-                int l =
-                    i < leftParts.Length
-                        ? leftParts[i]
-                        : 0;
-
-                int r =
-                    i < rightParts.Length
-                        ? rightParts[i]
-                        : 0;
-
-                if (l > r)
-                    return 1;
-
-                if (l < r)
-                    return -1;
-            }
-
-            return 0;
-        }
-
-        private int[] ParseVersion(
-            string version
-        )
-        {
-            if (string.IsNullOrEmpty(version))
-                return new[] { 0, 0, 0 };
-
-            string clean =
-                version.Trim();
-
-            int separator =
-                clean.IndexOfAny(
-                    new[]
-                    {
-                        '-',
-                        '+'
-                    }
-                );
-
-            if (separator >= 0)
-            {
-                clean =
-                    clean.Substring(
-                        0,
-                        separator
-                    );
-            }
-
-            string[] parts =
-                clean.Split('.');
-
-            List<int> numbers =
-                new List<int>();
-
-            foreach (string part in parts)
-            {
-                string digits = "";
-
-                foreach (char c in part)
-                {
-                    if (!char.IsDigit(c))
-                        break;
-
-                    digits += c;
-                }
-
-                int number;
-
-                if (
-                    !int.TryParse(
-                        digits,
-                        out number
-                    )
-                )
-                {
-                    number = 0;
-                }
-
-                numbers.Add(number);
-            }
-
-            while (numbers.Count < 3)
-                numbers.Add(0);
-
-            return numbers.ToArray();
-        }
-
-        #endregion
-
-        #region Install / Backup / Rollback
-
-        private UpdateOperation PrepareOperation(
-            string pluginName,
-            string source,
-            string expectedVersion,
-            string downloadedVersion,
-            string sourceType
-        )
-        {
-            string filePath =
-                FindPluginFile(
-                    pluginName
-                );
-
-            if (string.IsNullOrEmpty(filePath))
-            {
-                Warn(
-                    "[" +
-                    sourceType +
-                    "] " +
-                    pluginName +
-                    " | Файл .cs не найден."
-                );
-
-                updatingPlugins.Remove(
-                    pluginName
-                );
-
-                return null;
-            }
-
-            return new UpdateOperation
-            {
-                PluginName = pluginName,
-                FilePath = filePath,
-                BackupPath = filePath + ".bak",
-                ExpectedVersion = expectedVersion,
-                DownloadedVersion = downloadedVersion,
-                Source = source,
-                SourceType = sourceType
-            };
-        }
-
-        private void InstallOperation(
-            UpdateOperation operation,
-            Plugin plugin
-        )
-        {
-            if (operation == null)
-                return;
-
-            if (
-                string.IsNullOrEmpty(
-                    operation.Source
-                )
-            )
-            {
-                updatingPlugins.Remove(
-                    operation.PluginName
-                );
-
-                return;
-            }
-
-            if (
-                !operation.Source.Contains(
-                    "namespace Oxide.Plugins"
-                )
-            )
-            {
-                Warn(
-                    "[" +
-                    operation.SourceType +
-                    "] " +
-                    operation.PluginName +
-                    " | Файл не похож на Oxide-плагин. Отмена."
-                );
-
-                updatingPlugins.Remove(
-                    operation.PluginName
-                );
-
-                return;
-            }
-
-            try
-            {
-                if (config.CreateBackup)
-                {
-                    File.Copy(
-                        operation.FilePath,
-                        operation.BackupPath,
-                        true
-                    );
-
-                    Puts(
-                        "[" +
-                        operation.SourceType +
-                        "] " +
-                        operation.PluginName +
-                        " | Создан backup: " +
-                        Path.GetFileName(
-                            operation.BackupPath
-                        )
-                    );
-                }
-
-                File.WriteAllText(
-                    operation.FilePath,
-                    operation.Source
-                );
-
-                Puts(
-                    "[" +
-                    operation.SourceType +
-                    "] " +
-                    operation.PluginName +
-                    " | Файл записан: версия " +
-                    operation.DownloadedVersion
-                );
-
-                if (plugin != null)
-                {
-                    ReloadPlugin(
-                        operation.PluginName
-                    );
-
-                    if (
-                        config.VerifyAfterReload
-                    )
-                    {
-                        timer.Once(
-                            Mathf.Max(
-                                1f,
-                                config.VerifyDelay
-                            ),
-                            delegate
-                            {
-                                VerifyUpdate(
-                                    operation
-                                );
-                            }
-                        );
-                    }
-                    else
-                    {
-                        CompleteUpdate(
-                            operation
-                        );
-                    }
-                }
-                else
-                {
-                    CompleteUpdate(
-                        operation
-                    );
-                }
-            }
-            catch (Exception ex)
-            {
-                PrintError(
-                    "[" +
-                    operation.SourceType +
-                    "] " +
-                    operation.PluginName +
-                    " | Ошибка установки: " +
-                    ex.Message
-                );
-
-                if (
-                    config.RollbackOnError
-                )
-                {
-                    RollbackOperation(
-                        operation
-                    );
-                }
-                else
-                {
-                    updatingPlugins.Remove(
-                        operation.PluginName
-                    );
-                }
-            }
-        }
-
-        private void VerifyUpdate(
-            UpdateOperation operation
-        )
-        {
-            Plugin plugin =
-                plugins.Find(
-                    operation.PluginName
-                );
-
-            if (plugin == null)
-            {
-                PrintError(
-                    "[VERIFY] " +
-                    operation.PluginName +
-                    " | Плагин не загрузился после обновления."
-                );
-
-                if (
-                    config.RollbackOnError
-                )
-                {
-                    RollbackOperation(
-                        operation
-                    );
-                }
-                else
-                {
-                    updatingPlugins.Remove(
-                        operation.PluginName
-                    );
-                }
-
-                return;
-            }
-
-            string loadedVersion =
-                GetPluginVersion(
-                    plugin
-                );
-
-            int comparison =
-                CompareVersions(
-                    loadedVersion,
-                    operation.ExpectedVersion
-                );
-
-            if (comparison != 0)
-            {
-                PrintError(
-                    "[VERIFY] " +
-                    operation.PluginName +
-                    " | ОЖИДАЛОСЬ " +
-                    operation.ExpectedVersion +
-                    ", ЗАГРУЖЕНО " +
-                    loadedVersion
-                );
-
-                if (
-                    config.RollbackOnError
-                )
-                {
-                    RollbackOperation(
-                        operation
-                    );
-                }
-                else
-                {
-                    updatingPlugins.Remove(
-                        operation.PluginName
-                    );
-                }
-
-                return;
-            }
-
-            CompleteUpdate(
-                operation
-            );
-        }
-
-        private void CompleteUpdate(
-            UpdateOperation operation
-        )
-        {
-            updatingPlugins.Remove(
-                operation.PluginName
-            );
-
-            SetStatus(
-                operation.PluginName,
-                operation.SourceType,
-                operation.ExpectedVersion,
-                operation.ExpectedVersion,
-                operation.DownloadedVersion,
-                VersionState.Updated,
-                null
-            );
-
-            Puts(
-                "[" +
-                operation.SourceType +
-                "] " +
-                operation.PluginName +
-                " | УСПЕШНО ОБНОВЛЁН до " +
-                operation.ExpectedVersion
-            );
-
-            NotifyAdmin(
-                operation.PluginName +
-                " успешно обновлён до " +
-                operation.ExpectedVersion
-            );
-        }
-
-        private void RollbackOperation(
-            UpdateOperation operation
-        )
-        {
-            try
-            {
-                Plugin current =
-                    plugins.Find(
-                        operation.PluginName
-                    );
-
-                if (current != null)
-                {
-                    try
-                    {
-                        ConsoleSystem.Run(
-                            ConsoleSystem.Option.Server.Quiet(),
-                            "oxide.unload \"" +
-                            operation.PluginName +
-                            "\""
-                        );
-                    }
-                    catch
-                    {
-                    }
-                }
-
-                if (
-                    !File.Exists(
-                        operation.BackupPath
-                    )
-                )
-                {
-                    PrintError(
-                        "[ROLLBACK] " +
-                        operation.PluginName +
-                        " | .bak файл отсутствует!"
-                    );
-
-                    updatingPlugins.Remove(
-                        operation.PluginName
-                    );
-
-                    return;
-                }
-
-                File.Copy(
-                    operation.BackupPath,
-                    operation.FilePath,
-                    true
-                );
-
-                Puts(
-                    "[ROLLBACK] " +
-                    operation.PluginName +
-                    " | Восстановлен .bak"
-                );
-
-                ConsoleSystem.Run(
-                    ConsoleSystem.Option.Server.Quiet(),
-                    "oxide.load \"" +
-                    operation.PluginName +
-                    "\""
-                );
-
-                SetStatus(
-                    operation.PluginName,
-                    operation.SourceType,
-                    operation.ExpectedVersion,
-                    operation.ExpectedVersion,
-                    operation.DownloadedVersion,
-                    VersionState.Rollback,
-                    "Выполнен автоматический откат"
-                );
-
-                NotifyAdmin(
-                    operation.PluginName +
-                    " — ошибка обновления, выполнен автоматический откат."
-                );
-            }
-            catch (Exception ex)
-            {
-                PrintError(
-                    "[ROLLBACK] " +
-                    operation.PluginName +
-                    " | КРИТИЧЕСКАЯ ОШИБКА: " +
-                    ex.Message
-                );
-            }
-
-            updatingPlugins.Remove(
-                operation.PluginName
-            );
-        }
-
-        private void ReloadPlugin(
-            string pluginName
-        )
-        {
-            Puts(
-                "[RELOAD] Перезагрузка: " +
-                pluginName
-            );
-
-            ConsoleSystem.Run(
-                ConsoleSystem.Option.Server.Quiet(),
-                "oxide.reload \"" +
-                pluginName +
-                "\""
-            );
-        }
-
-        private string FindPluginFile(
-            string pluginName
-        )
-        {
-            if (
-                string.IsNullOrEmpty(
-                    pluginName
-                )
-            )
-                return null;
-
-            string directory =
-                Interface.Oxide.PluginDirectory;
-
-            string exact =
-                Path.Combine(
-                    directory,
-                    pluginName + ".cs"
-                );
-
-            if (File.Exists(exact))
-                return exact;
-
-            string found =
-                Directory
-                .GetFiles(
-                    directory,
-                    "*.cs"
-                )
-                .FirstOrDefault(
-                    x =>
-                        Path.GetFileNameWithoutExtension(
-                            x
-                        ).Equals(
-                            pluginName,
-                            StringComparison.OrdinalIgnoreCase
-                        )
-                );
-
-            return found;
-        }
-
-        #endregion
-
-        #region Network
-
-        private void EnqueueGetWithRetry(
-            string url,
-            int retries,
-            Action<int, string> callback
-        )
-        {
-            if (string.IsNullOrEmpty(url))
-            {
-                callback(
-                    0,
-                    null
-                );
-
-                return;
-            }
-
-            int attempts =
-                Mathf.Max(
-                    1,
-                    retries
-                );
-
-            EnqueueGetAttempt(
-                url,
-                attempts,
-                callback
-            );
-        }
-
-        private void EnqueueGetAttempt(
-            string url,
-            int remaining,
-            Action<int, string> callback
-        )
-        {
-            webrequest.EnqueueGet(
-                url,
-                delegate(
-                    int code,
-                    string response
-                )
-                {
-                    bool success =
-                        code == 200 &&
-                        !string.IsNullOrEmpty(
-                            response
-                        );
-
-                    if (success)
-                    {
-                        callback(
-                            code,
-                            response
-                        );
-
-                        return;
-                    }
-
-                    if (remaining <= 1)
-                    {
-                        callback(
-                            code,
-                            response
-                        );
-
-                        return;
-                    }
-
-                    Warn(
-                        "[Network] Ошибка HTTP " +
-                        code +
-                        " | Повтор через " +
-                        config.NetworkRetryDelay +
-                        " сек. | Осталось попыток: " +
-                        (remaining - 1)
-                    );
-
-                    timer.Once(
-                        Mathf.Max(
-                            1f,
-                            config.NetworkRetryDelay
-                        ),
-                        delegate
-                        {
-                            EnqueueGetAttempt(
-                                url,
-                                remaining - 1,
-                                callback
-                            );
-                        }
-                    );
-                },
-                this
-            );
-        }
-
-        #endregion
-
-        #region Status
-
-        private void SetStatus(
-            string name,
-            string source,
-            string current,
-            string manifest,
-            string remote,
-            VersionState state,
-            string error
-        )
-        {
-            PluginStatus status;
-
-            if (
-                !statuses.TryGetValue(
-                    name,
-                    out status
-                )
-            )
-            {
-                status =
-                    new PluginStatus();
-
-                statuses[name] =
-                    status;
-            }
-
-            status.Name =
-                name;
-
-            status.Source =
-                source;
-
-            status.CurrentVersion =
-                current;
-
-            status.ManifestVersion =
-                manifest;
-
-            status.RemoteVersion =
-                remote;
-
-            status.State =
-                state;
-
-            status.ErrorMessage =
-                error;
+            s.Name = name;
+            s.Source = source;
+            s.Current = current;
+            s.Remote = remote;
+            s.State = state;
+            s.Error = error;
         }
 
         private void PrintStatus()
         {
-            Puts(
-                "========== METALICRUST AUTOUPDATER =========="
-            );
+            Puts("========== METALICRUST AUTOUPDATER ==========");
 
-            Puts(
-                "Версия AutoUpdater: 2.1.0"
-            );
-
-            Puts(
-                "Автообновление: " +
-                (
-                    config.AutoUpdate
-                        ? "ВКЛ"
-                        : "ВЫКЛ"
-                )
-            );
-
-            foreach (
-                KeyValuePair<string, PluginStatus> entry
-                in statuses
-            )
+            foreach (PluginEntry entry in config.Plugins)
             {
-                PluginStatus s =
-                    entry.Value;
-
-                string current =
-                    string.IsNullOrEmpty(
-                        s.CurrentVersion
-                    )
-                        ? "?"
-                        : s.CurrentVersion;
-
-                string manifest =
-                    string.IsNullOrEmpty(
-                        s.ManifestVersion
-                    )
-                        ? "-"
-                        : s.ManifestVersion;
-
-                string remote =
-                    string.IsNullOrEmpty(
-                        s.RemoteVersion
-                    )
-                        ? "-"
-                        : s.RemoteVersion;
-
-                Puts(
-                    s.Name +
-                    " | " +
-                    s.Source +
-                    " | local=" +
-                    current +
-                    " | manifest=" +
-                    manifest +
-                    " | file=" +
-                    remote +
-                    " | " +
-                    GetStateText(
-                        s.State
-                    )
-                );
-
-                if (
-                    !string.IsNullOrEmpty(
-                        s.ErrorMessage
-                    )
-                )
+                PluginStatus s;
+                if (!statuses.TryGetValue(entry.Name, out s))
                 {
-                    Puts(
-                        "    -> " +
-                        s.ErrorMessage
-                    );
+                    Puts(entry.Name + " | НЕ ПРОВЕРЕН");
+                    continue;
                 }
+
+                string current = string.IsNullOrEmpty(s.Current) ? "?" : s.Current;
+                string remote = string.IsNullOrEmpty(s.Remote) ? "-" : s.Remote;
+
+                Puts(entry.Name + " | " + s.Source + " | " + current + " -> " + remote + " | " + StateText(s.State));
+
+                if (!string.IsNullOrEmpty(s.Error))
+                    Puts("    " + s.Error);
             }
 
-            Puts(
-                "============================================="
-            );
+            Puts("==============================================");
         }
 
-        private string GetStateText(
-            VersionState state
-        )
+        private string StateText(VersionState state)
         {
             switch (state)
             {
-                case VersionState.UpToDate:
-                    return "OK";
-
-                case VersionState.UpdateAvailable:
-                    return "UPDATE";
-
-                case VersionState.ManifestNewer:
-                    return "MANIFEST NEWER";
-
-                case VersionState.FileNewer:
-                    return "FILE NEWER";
-
-                case VersionState.Mismatch:
-                    return "MISMATCH";
-
-                case VersionState.NetworkError:
-                    return "NETWORK ERROR";
-
-                case VersionState.NotLoaded:
-                    return "NOT LOADED";
-
-                case VersionState.Protected:
-                    return "PROTECTED";
-
-                case VersionState.InvalidSource:
-                    return "INVALID SOURCE";
-
-                case VersionState.Updated:
-                    return "UPDATED";
-
-                case VersionState.Rollback:
-                    return "ROLLBACK";
-
-                default:
-                    return "UNKNOWN";
+                case VersionState.UpToDate: return "OK";
+                case VersionState.UpdateAvailable: return "UPDATE";
+                case VersionState.FileNewer: return "LOCAL NEWER";
+                case VersionState.NetworkError: return "NETWORK ERROR";
+                case VersionState.RateLimited: return "RATE LIMITED";
+                case VersionState.NotFound: return "NOT FOUND";
+                case VersionState.Cooldown: return "COOLDOWN";
+                case VersionState.NotLoaded: return "NOT LOADED";
+                case VersionState.Protected: return "PROTECTED";
+                case VersionState.Updated: return "UPDATED";
+                case VersionState.Rollback: return "ROLLBACK";
+                default: return "UNKNOWN";
             }
-        }
-
-        #endregion
-
-        #region Local
-
-        private void PrintLocalPlugins()
-        {
-            Puts(
-                "========== ЛОКАЛЬНЫЕ ПЛАГИНЫ =========="
-            );
-
-            foreach (
-                Plugin plugin
-                in plugins.GetAll()
-            )
-            {
-                if (plugin == null)
-                    continue;
-
-                Puts(
-                    plugin.Name +
-                    " | " +
-                    GetPluginVersion(
-                        plugin
-                    )
-                );
-            }
-
-            Puts(
-                "======================================="
-            );
-        }
-
-        #endregion
-
-        #region Protected
-
-        private bool IsProtected(
-            string pluginName
-        )
-        {
-            if (string.IsNullOrEmpty(pluginName))
-                return true;
-
-            return config.ProtectedPlugins.Any(
-                x =>
-                    x.Equals(
-                        pluginName,
-                        StringComparison.OrdinalIgnoreCase
-                    )
-            );
-        }
-
-        private void PrintProtected()
-        {
-            Puts(
-                "========== ЗАЩИЩЁННЫЕ ПЛАГИНЫ =========="
-            );
-
-            foreach (
-                string plugin
-                in config.ProtectedPlugins
-            )
-            {
-                Puts(
-                    plugin
-                );
-            }
-
-            Puts(
-                "========================================="
-            );
         }
 
         #endregion
 
         #region Helpers
 
-        private string GetPluginVersion(
-            Plugin plugin
-        )
+        private string ExtractInfoVersion(string source)
         {
-            if (plugin == null)
-                return "0.0.0";
-
-            return plugin.Version != null
-                ? plugin.Version.ToString()
-                : "0.0.0";
-        }
-
-        private string GetDownloadUrl(
-            LatestPluginInfo info
-        )
-        {
-            if (
-                info == null
-            )
+            if (string.IsNullOrEmpty(source))
                 return null;
 
-            if (
-                !string.IsNullOrEmpty(
-                    info.download_url
-                )
-            )
-            {
-                return info.download_url;
-            }
+            Match m = Regex.Match(
+                source,
+                @"\[Info\s*\(\s*""[^""]*""\s*,\s*""[^""]*""\s*,\s*""([^""]+)""\s*\)\]",
+                RegexOptions.IgnoreCase);
 
-            if (
-                !string.IsNullOrEmpty(
-                    info.download
-                )
-            )
-            {
-                return info.download;
-            }
-
-            return null;
+            return m.Success ? m.Groups[1].Value.Trim() : null;
         }
 
-        private void Warn(
-            string message
-        )
+        private string GetPluginVersion(Plugin plugin)
         {
-            PrintWarning(
-                message
-            );
+            if (plugin == null || plugin.Version == null)
+                return "0.0.0";
+
+            return plugin.Version.ToString();
         }
 
-        private void NotifyAdmin(
-            string message
-        )
+        private int CompareVersions(string left, string right)
+        {
+            Version a = ParseVersion(left);
+            Version b = ParseVersion(right);
+            return a.CompareTo(b);
+        }
+
+        private Version ParseVersion(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return new Version(0, 0, 0, 0);
+
+            string clean = Regex.Replace(value.Trim(), @"[^0-9\.]", "");
+            string[] parts = clean.Split('.');
+
+            int[] p = new int[4];
+
+            for (int i = 0; i < p.Length && i < parts.Length; i++)
+            {
+                int n;
+                if (int.TryParse(parts[i], out n))
+                    p[i] = n;
+            }
+
+            return new Version(p[0], p[1], p[2], p[3]);
+        }
+
+        private void Warn(string message)
+        {
+            PrintWarning(message);
+        }
+
+        private void NotifyAdmin(string message)
         {
             if (!config.NotifyAdmins)
                 return;
 
-            foreach (
-                BasePlayer player
-                in BasePlayer.activePlayerList
-            )
+            foreach (BasePlayer player in BasePlayer.activePlayerList)
             {
-                if (player == null)
+                if (player == null || !player.IsAdmin)
                     continue;
 
-                if (!player.IsAdmin)
-                    continue;
-
-                SendReply(
-                    player,
-                    "<color=#00ff88>[MetalicRust]</color> " +
-                    message
-                );
+                SendReply(player, "<color=#00ff88>[MetalicRust]</color> " + message);
             }
         }
 
         #endregion
 
-        #region JSON
+        #region DTO
 
         private class LatestPluginInfo
         {
@@ -2409,6 +1145,15 @@ namespace Oxide.Plugins
             public string title;
             public string name;
             public string author;
+        }
+
+        private class UpdateOperation
+        {
+            public string PluginName;
+            public string FilePath;
+            public string BackupPath;
+            public string ExpectedVersion;
+            public string SourceType;
         }
 
         #endregion
