@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("MetalicRustAutoUpdater", "MetalicRust", "2.1.0")]
+    [Info("MetalicRustAutoUpdater", "MetalicRust", "3.0.0")]
     [Description("Автоматическая проверка и безопасное обновление плагинов MetalicRust через uMod и GitHub.")]
     public class MetalicRustAutoUpdater : RustPlugin
     {
