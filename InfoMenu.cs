@@ -27,6 +27,9 @@ namespace Oxide.Plugins
         [PluginReference] private Plugin GameStoresRUST;
         [PluginReference] private Plugin ServerRewards;
         private const string MainLayer = "MetalicRust_InfoMenu";
+        private const string ShopQrImageKey = "MetalicRust_GameStore_QR";
+        private const string DefaultShopQrUrl = "https://cdn.imagetourls.com/uploads/tyImg/X8qMgsxM.png";
+        private readonly HashSet<ulong> openMenuPlayers = new HashSet<ulong>();
         private const string CopterKitKey = "COPTER_ONE_PRESET_KIT";
         private const string CopterPermission = "iqkits.w5";
 
@@ -44,6 +47,7 @@ namespace Oxide.Plugins
         private readonly Dictionary<ulong, string> lastInventoryFullKit = new Dictionary<ulong, string>();
         private readonly Dictionary<ulong, int> openKitPages = new Dictionary<ulong, int>();
         private readonly Dictionary<ulong, int> openShopCategories = new Dictionary<ulong, int>();
+        private readonly Dictionary<ulong, string> activeSideCommands = new Dictionary<ulong, string>();
 
         private readonly Dictionary<ulong, List<GameStoreBasketItem>> gameStoreBaskets = new Dictionary<ulong, List<GameStoreBasketItem>>();
         private readonly HashSet<ulong> gameStorePurchasesInProgress = new HashSet<ulong>();
@@ -163,6 +167,16 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             if (config.SideButtons.Any(x => x == null || string.IsNullOrWhiteSpace(x.Title) || string.IsNullOrWhiteSpace(x.Command)))
                 config.SideButtons = PluginConfig.DefaultConfig().SideButtons;
 
+            // ВАЙПБЛОК полностью убран из списка левого меню.
+            // Удаляем его также из уже существующего config.json, чтобы старая запись не вернулась.
+            config.SideButtons = config.SideButtons
+                .Where(x => x != null
+                    && !string.Equals(x.Command, "wipeblock", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(x.Title, "ВАЙПБЛОК", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            SaveConfig();
+
             if (config.TopTabs.Any(x => x == null || string.IsNullOrWhiteSpace(x.Title) || string.IsNullOrWhiteSpace(x.Key)))
                 config.TopTabs = PluginConfig.DefaultConfig().TopTabs;
 
@@ -233,11 +247,11 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             public string WelcomeLine2 = "На сервер METALICRUST";
 
             [JsonProperty("Приветствие. Строка 3")]
-            public string WelcomeLine3 = "Онлайн магазин: metalicrust.com";
+            public string WelcomeLine3 = "ОНЛАЙН МАГАЗИН: https://cheapstore.gamestores.app/";
 
             [JsonProperty("Информация справа в баннере")]
             public string BannerRightText =
-                "ВАЙПЫ ПРОХОДЯТ ПО ВТОРНИКАМ В 14:00 ПО МСК\nПО СУББОТАМ В 13:00 ПО МСК";
+                "ВАЙПЫ ПРОХОДЯТ ПО ЧЕТВЕРГАМ В 17:00 ПО МСК";
 
             [JsonProperty("Показывать фоновое изображение")]
             public bool ShowBackground = false;
@@ -309,7 +323,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             public string SteamIcon = "";
 
             [JsonProperty("QR магазина URL")]
-            public string ShopQr = "";
+            public string ShopQr = "https://cdn.imagetourls.com/uploads/tyImg/X8qMgsxM.png";
 
             [JsonProperty("QR Discord URL")]
             public string DiscordQr = "";
@@ -363,7 +377,6 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
                     new SideButton("КИТЫ", "kit"),
                     new SideButton("РЕПОРТЫ", "report"),
                     new SideButton("МАГАЗИН", "shop"),
-                    new SideButton("ВАЙПБЛОК", "wipeblock"),
                     new SideButton("СТАТИСТИКА", "top"),
                     new SideButton("УВЕДОМЛЕНИЯ", "notifications"),
                     new SideButton("КРАФТЫ", "craft"),
@@ -664,7 +677,6 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
                 config.VkIcon,
                 config.TelegramIcon,
                 config.SteamIcon,
-                config.ShopQr,
                 config.DiscordQr,
                 config.VkQr,
                 config.TelegramQr,
@@ -674,7 +686,36 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             foreach (string url in images)
             {
                 if (!string.IsNullOrEmpty(url))
-                    ImageLibrary.Call("AddImage", url, url);
+                    ImageLibrary.Call("AddImage", url, url, 0UL);
+            }
+
+            // QR магазина загружаем отдельным ключом и только после загрузки
+            // перерисовываем уже открытое меню. Иначе ImageLibrary может ещё
+            // не успеть скачать PNG, и Rust показывает знак вопроса.
+            string shopQrUrl = string.IsNullOrEmpty(config.ShopQr) ? DefaultShopQrUrl : config.ShopQr;
+
+            if (!string.IsNullOrEmpty(shopQrUrl))
+            {
+                ImageLibrary.Call(
+                    "AddImage",
+                    shopQrUrl,
+                    ShopQrImageKey,
+                    0UL,
+                    (Action)(() =>
+                    {
+                        foreach (BasePlayer online in BasePlayer.activePlayerList.ToList())
+                        {
+                            if (online == null || !online.IsConnected || !openMenuPlayers.Contains(online.userID))
+                                continue;
+
+                            timer.Once(0.05f, () =>
+                            {
+                                if (online != null && online.IsConnected && openMenuPlayers.Contains(online.userID))
+                                    OpenMenu(online, 0);
+                            });
+                        }
+                    })
+                );
             }
         }
 
@@ -728,6 +769,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             lastInventoryFullKit.Clear();
             openKitPages.Clear();
             openShopCategories.Clear();
+            activeSideCommands.Clear();
             gameStorePurchasesInProgress.Clear();
             pendingShopConfirmations.Clear();
             SaveData();
@@ -748,6 +790,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             openKitPages.Remove(player.userID);
             gameStorePurchasesInProgress.Remove(player.userID);
             pendingShopConfirmations.Remove(player.userID);
+            activeSideCommands.Remove(player.userID);
             pendingKitTakes.Remove(player.userID);
             lastInventoryFullKit.Remove(player.userID);
         }
@@ -955,8 +998,36 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             switch (command.TrimStart('/').ToLowerInvariant())
             {
                 case "kit":
+                    // КИТЫ: открываем именно встроенную страницу InfoMenu, а не отправляем /kit в чат.
                     OpenKitsPage(player, 0);
                     return;
+
+                case "shop":
+                    // МАГАЗИН: открываем встроенный магазин InfoMenu.
+                    OpenShopPage(player);
+                    return;
+
+                case "rules":
+                    // ПРАВИЛА: открываем именно вкладку ПРАВИЛА InfoMenu.
+                    OpenMenu(player, 3);
+                    return;
+
+                case "quests":
+                    // КВЕСТЫ: выполняем штатную серверную команду.
+                    player.SendConsoleCommand("chat.say", "/quests");
+                    return;
+
+                case "clan":
+                    // КЛАН: выполняем штатную серверную команду.
+                    player.SendConsoleCommand("chat.say", "/clan");
+                    return;
+
+                case "toptime":
+                    // ТОП ВРЕМЕНИ: открываем встроенную статистику InfoMenu.
+                    // Существующую статистику игрока и левое меню не изменяем.
+                    OpenStatisticsPage(player, 0);
+                    return;
+
                 default:
                     player.SendConsoleCommand("chat.say", "/" + command.TrimStart('/'));
                     return;
@@ -1209,7 +1280,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
 
             container.Add(new CuiPanel
             {
-                Image = { Color = "0 0 0 0" },
+                Image = { Color = "0 0 0 0", FadeIn = 0.22f },
                 RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" }
             }, MainLayer + ".Main", content);
 
@@ -1224,26 +1295,6 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             AddText(container, shopLayer,
                 "ТОВАРЫ METALICRUST • GAMESTORES", 10, TextAnchor.UpperLeft,
                 config.SecondaryTextColor, "0.037 0.84", "0.70 0.90", "ShopSubtitle");
-
-            // QR-код магазина — встроен непосредственно в C# как PNG Base64.
-            // Он всегда рисуется в самом меню магазина и не зависит от ImageLibrary.
-            container.Add(new CuiPanel
-            {
-                Image = { Color = "0.05 0.06 0.06 1" },
-                RectTransform = { AnchorMin = "0.895 0.905", AnchorMax = "0.975 0.985" }
-            }, shopLayer, shopLayer + ".ShopQrPanel");
-
-            DrawStoreQr(
-                container,
-                shopLayer + ".ShopQrPanel",
-                "0.04 0.04",
-                "0.96 0.96",
-                1f
-            );
-
-            AddText(container, shopLayer,
-                "QR", 8, TextAnchor.MiddleCenter, config.SecondaryTextColor,
-                "0.895 0.887", "0.975 0.905", "ShopQrLabel");
 
             // Верхние кнопки магазина находятся внутри основной области InfoMenu.
 
@@ -1538,7 +1589,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
 
             container.Add(new CuiPanel
             {
-                Image = { Color = "0 0 0 0" },
+                Image = { Color = "0 0 0 0", FadeIn = 0.22f },
                 RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" }
             }, MainLayer + ".Main", content);
 
@@ -1649,7 +1700,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
 
             container.Add(new CuiPanel
             {
-                Image = { Color = "0 0 0 0" },
+                Image = { Color = "0 0 0 0", FadeIn = 0.22f },
                 RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" }
             }, MainLayer + ".Main", content);
 
@@ -1739,7 +1790,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             var container = new CuiElementContainer();
             string content = MainLayer + ".Content";
             string layer = content + ".GameStore";
-            container.Add(new CuiPanel { Image = { Color = "0 0 0 0" }, RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" } }, MainLayer + ".Main", content);
+            container.Add(new CuiPanel { Image = { Color = "0 0 0 0", FadeIn = 0.22f }, RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" } }, MainLayer + ".Main", content);
             container.Add(new CuiPanel { Image = { Color = ParseColor(config.CardColor) }, RectTransform = { AnchorMin = "0 0", AnchorMax = "1 1" } }, content, layer);
             AddText(container, layer, "КОРЗИНА", 22, TextAnchor.UpperLeft, config.TextColor, "0.035 0.90", "0.45 0.98", "ShopTitle");
             AddText(container, layer, "ЗАГРУЗКА КОРЗИНЫ GAMESTORES...", 18, TextAnchor.MiddleCenter, config.TextColor, "0.10 0.45", "0.90 0.58", "CartLoading");
@@ -2358,7 +2409,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
 
             container.Add(new CuiPanel
             {
-                Image = { Color = "0 0 0 0" },
+                Image = { Color = "0 0 0 0", FadeIn = 0.22f },
                 RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" }
             }, MainLayer + ".Main", content);
 
@@ -2645,7 +2696,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             if (data == null) data = new PlayerData();
             if (progress == null) progress = new RankProgress();
 
-            c.Add(new CuiPanel { Image = { Color = "0.10 0.11 0.12 0.98" }, RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" } }, MainLayer + ".Main", content);
+            c.Add(new CuiPanel { Image = { Color = "0.10 0.11 0.12 0.98", FadeIn = 0.22f }, RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" } }, MainLayer + ".Main", content);
             c.Add(new CuiPanel { Image = { Color = "0.10 0.11 0.12 1" }, RectTransform = { AnchorMin = "0 0", AnchorMax = "1 1" } }, content, layer);
             HighlightSideButton(c, "top");
 
@@ -3664,6 +3715,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             CuiHelper.DestroyUi(player, MainLayer);
             CuiHelper.DestroyUi(player, "UI_KIT_OVERLAY");
             openKitPages.Remove(player.userID);
+            openMenuPlayers.Remove(player.userID);
         }
 
         private void OpenMenu(BasePlayer player, int topIndex, bool showTopTabs = true)
@@ -3677,6 +3729,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             topIndex = Mathf.Clamp(topIndex, 0, config.TopTabs.Count - 1);
 
             DestroyMenu(player);
+            openMenuPlayers.Add(player.userID);
 
             var container = new CuiElementContainer();
 
@@ -3732,7 +3785,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             // Главная панель.
             container.Add(new CuiPanel
             {
-                Image = { Color = ParseColor(config.MainPanelColor), FadeIn = 0.18f },
+                Image = { Color = ParseColor(config.MainPanelColor), FadeIn = 0.22f },
                 RectTransform =
                 {
                     AnchorMin = "0.045 0.075",
@@ -3743,7 +3796,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             // Левая колонка.
             container.Add(new CuiPanel
             {
-                Image = { Color = ParseColor(config.SidebarColor) },
+                Image = { Color = ParseColor(config.SidebarColor), FadeIn = 0.20f },
                 RectTransform =
                 {
                     AnchorMin = "0 0",
@@ -3789,13 +3842,16 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
 
                 string buttonName = MainLayer + ".Side." + i;
 
+                activeSideCommands.TryGetValue(player.userID, out string activeSideCommand);
+                bool selectedSide = string.Equals(activeSideCommand, config.SideButtons[i].Command, StringComparison.OrdinalIgnoreCase);
+
                 container.Add(new CuiButton
                 {
                     Button =
                     {
                         Command = $"infomenu.side {i}",
-                        Color = ParseColor(config.ButtonColor),
-                        HighlightedColor = ParseColor(config.ButtonHoverColor)
+                        Color = ParseColor(selectedSide ? config.GreenColor : config.ButtonColor),
+                        HighlightedColor = ParseColor(selectedSide ? config.GreenColor : config.ButtonHoverColor)
                     },
                     Text =
                     {
@@ -3803,7 +3859,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
                         Font = config.Font,
                         FontSize = config.ButtonFontSize,
                         Align = TextAnchor.MiddleCenter,
-                        Color = ParseColor(config.TextColor)
+                        Color = ParseColor(selectedSide ? "0 0 0 1" : config.TextColor)
                     },
                     RectTransform =
                     {
@@ -3895,7 +3951,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
 
             container.Add(new CuiPanel
             {
-                Image = { Color = "0 0 0 0" },
+                Image = { Color = "0 0 0 0", FadeIn = 0.22f },
                 RectTransform =
                 {
                     AnchorMin = "0.195 0.045",
@@ -3992,10 +4048,11 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
                 "BannerRight"
             );
 
-            // Пять карточек как на изображении.
+            // Три карточки: МАГАЗИН, ВКОНТАКТЕ и TELEGRAM.
+            // DISCORD и STEAM из меню ИНФОРМАЦИЯ убраны.
             float startX = 0.015f;
             const float gap = 0.012f;
-            float width = (0.97f - gap * 4f) / 5f;
+            float width = (0.97f - gap * 2f) / 3f;
 
             DrawSocialCard(
                 container,
@@ -4014,18 +4071,6 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
                 parent,
                 startX + (width + gap) * 1,
                 width,
-                "DISCORD",
-                config.DiscordIcon,
-                config.DiscordQr,
-                config.DiscordUrl,
-                config.BlueColor
-            );
-
-            DrawSocialCard(
-                container,
-                parent,
-                startX + (width + gap) * 2,
-                width,
                 "ВКОНТАКТЕ",
                 config.VkIcon,
                 config.VkQr,
@@ -4036,24 +4081,12 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             DrawSocialCard(
                 container,
                 parent,
-                startX + (width + gap) * 3,
+                startX + (width + gap) * 2,
                 width,
                 "TELEGRAM",
                 config.TelegramIcon,
                 config.TelegramQr,
                 config.TelegramUrl,
-                config.BlueColor
-            );
-
-            DrawSocialCard(
-                container,
-                parent,
-                startX + (width + gap) * 4,
-                width,
-                "STEAM",
-                config.SteamIcon,
-                config.SteamQr,
-                config.SteamUrl,
                 config.BlueColor
             );
         }
@@ -4127,14 +4160,15 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
                 "Link"
             );
 
-            // QR.
+            // QR GameStores — всегда встроенный PNG Base64.
+            // ImageLibrary здесь не используется, поэтому вместо QR не появится знак ?.
             if (string.Equals(qr, "__METALICRUST_GAMESTORE_QR__", StringComparison.Ordinal))
             {{
                 DrawStoreQr(
                     container,
                     card,
-                    "0.10 0.04",
-                    "0.90 0.38",
+                    "0.5 0.21",
+                    "0.5 0.21",
                     1f
                 );
             }}
@@ -4163,9 +4197,8 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             DrawCommandButton(container, parent, "/kit", "КИТЫ", "Открыть наборы", 0.72f);
             DrawCommandButton(container, parent, "/shop", "МАГАЗИН", "Открыть магазин", 0.61f);
             DrawCommandButton(container, parent, "/quests", "КВЕСТЫ", "Открыть квесты", 0.50f);
-            DrawCommandButton(container, parent, "/clan", "КЛАН", "Открыть меню клана", 0.39f);
-            DrawCommandButton(container, parent, "/toptime", "ТОП ВРЕМЕНИ", "Рейтинг времени игры", 0.28f);
-            DrawCommandButton(container, parent, "/rules", "ПРАВИЛА", "Правила сервера", 0.17f);
+                    DrawCommandButton(container, parent, "/toptime", "ТОП ВРЕМЕНИ", "Рейтинг времени игры", 0.39f);
+            DrawCommandButton(container, parent, "/rules", "ПРАВИЛА", "Правила сервера", 0.28f);
         }
 
         private void DrawBinds(CuiElementContainer container, string parent)
@@ -4299,6 +4332,61 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             }, parent, id);
         }
 
+        private void RefreshSideButtons(BasePlayer player)
+        {
+            if (player == null || !player.IsConnected || config.SideButtons == null)
+                return;
+
+            // Убираем баннер статистики при переходе на любую другую страницу.
+            CuiHelper.DestroyUi(player, MainLayer + ".StatsRewardBar");
+
+            var c = new CuiElementContainer();
+            float top = 0.845f;
+            const float height = 0.055f;
+            const float gap = 0.014f;
+
+            activeSideCommands.TryGetValue(player.userID, out string activeCommand);
+
+            for (int i = 0; i < config.SideButtons.Count; i++)
+            {
+                float bottom = top - height;
+                if (bottom < 0.045f)
+                    break;
+
+                string buttonName = MainLayer + ".Side." + i;
+                CuiHelper.DestroyUi(player, buttonName);
+
+                bool selected = string.Equals(activeCommand, config.SideButtons[i].Command, StringComparison.OrdinalIgnoreCase);
+
+                c.Add(new CuiButton
+                {
+                    Button =
+                    {
+                        Command = $"infomenu.side {i}",
+                        Color = ParseColor(selected ? config.GreenColor : config.ButtonColor),
+                        HighlightedColor = ParseColor(selected ? config.GreenColor : config.ButtonHoverColor)
+                    },
+                    Text =
+                    {
+                        Text = config.SideButtons[i].Title,
+                        Font = config.Font,
+                        FontSize = config.ButtonFontSize,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = ParseColor(selected ? "0 0 0 1" : config.TextColor)
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = $"0.055 {bottom:0.###}",
+                        AnchorMax = $"0.945 {top:0.###}"
+                    }
+                }, MainLayer + ".Side", buttonName);
+
+                top = bottom - gap;
+            }
+
+            CuiHelper.AddUi(player, c);
+        }
+
         private void HandleSideButton(BasePlayer player, int index)
         {
             if (player == null)
@@ -4311,6 +4399,10 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
 
             if (string.IsNullOrEmpty(command))
                 return;
+
+            // Запоминаем выбранную кнопку, чтобы она оставалась зелёной после перехода.
+            activeSideCommands[player.userID] = command;
+            RefreshSideButtons(player);
 
             switch (command.ToLowerInvariant())
             {
@@ -4335,27 +4427,23 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
                     break;
 
                 case "wipe":
-                    player.ChatMessage(
-                        $"<color=#55ff22>{config.ServerTitle}</color>: информация о вайпе доступна в разделе КАЛЕНДАРЬ ВАЙПОВ."
-                    );
+                    // Календарь вайпов находится внутри вкладки ИНФОРМАЦИЯ.
+                    OpenMenu(player, 0);
                     break;
 
                 case "notifications":
-                    player.ChatMessage(
-                        $"<color=#55ff22>{config.ServerTitle}</color>: уведомления сервера."
-                    );
+                    // Открываем команду уведомлений плагина, если она существует.
+                    player.SendConsoleCommand("chat.say", "/notifications");
                     break;
 
                 case "craft":
-                    player.ChatMessage(
-                        $"<color=#55ff22>{config.ServerTitle}</color>: раздел КРАФТЫ."
-                    );
+                    // Открываем меню крафтов через серверную команду.
+                    player.SendConsoleCommand("chat.say", "/craft");
                     break;
 
                 case "feedback":
-                    player.ChatMessage(
-                        $"<color=#55ff22>{config.ServerTitle}</color>: обратная связь с администрацией."
-                    );
+                    // Открываем обратную связь через серверную команду.
+                    player.SendConsoleCommand("chat.say", "/feedback");
                     break;
 
                 case "cart":
@@ -4363,9 +4451,8 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
                     break;
 
                 case "wipeblock":
-                    player.ChatMessage(
-                        $"<color=#55ff22>{config.ServerTitle}</color>: информация о вайпблоке."
-                    );
+                    // Открываем меню/страницу WipeBlock через его серверную команду.
+                    player.SendConsoleCommand("chat.say", "/wipeblock");
                     break;
 
                 default:
@@ -4668,7 +4755,7 @@ private readonly Dictionary<string, string> statIcons = new Dictionary<string, s
             string content = MainLayer + ".ChatContent";
             c.Add(new CuiPanel
             {
-                Image = { Color = "0 0 0 0" },
+                Image = { Color = "0 0 0 0", FadeIn = 0.22f },
                 RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" }
             }, MainLayer + ".Main", content);
 
@@ -6001,7 +6088,7 @@ private void OnRocketLaunched(BasePlayer player, BaseEntity entity)
 
             container.Add(new CuiPanel
             {
-                Image = { Color = "0 0 0 0" },
+                Image = { Color = "0 0 0 0", FadeIn = 0.22f },
                 RectTransform = { AnchorMin = "0.195 0.045", AnchorMax = "0.985 0.895" }
             }, MainLayer + ".Main", content);
 
@@ -7150,7 +7237,21 @@ private void OnRocketLaunched(BasePlayer player, BaseEntity entity)
             string anchorMax,
             float alpha)
         {
-            if (string.IsNullOrEmpty(GameStoreQrBase64))
+            // Сначала используем реальный QR магазина из ImageLibrary.
+            // Это именно QR: https://cdn.imagetourls.com/uploads/tyImg/X8qMgsxM.png
+            string qrPng = null;
+
+            if (ImageLibrary != null)
+            {
+                qrPng = ImageLibrary.Call("GetImage", ShopQrImageKey) as string;
+            }
+
+            // Если ImageLibrary ещё не успел скачать PNG, используем встроенный
+            // резервный QR, чтобы в меню никогда не появлялся знак ?.
+            if (string.IsNullOrEmpty(qrPng))
+                qrPng = GameStoreQrBase64;
+
+            if (string.IsNullOrEmpty(qrPng))
                 return;
 
             container.Add(new CuiElement
@@ -7160,13 +7261,15 @@ private void OnRocketLaunched(BasePlayer player, BaseEntity entity)
                 {
                     new CuiRawImageComponent
                     {
-                        Png = GameStoreQrBase64,
+                        Png = qrPng,
                         Color = $"1 1 1 {alpha.ToString("0.##", CultureInfo.InvariantCulture)}"
                     },
                     new CuiRectTransformComponent
                     {
-                        AnchorMin = anchorMin,
-                        AnchorMax = anchorMax
+                        AnchorMin = "0.5 0.21",
+                        AnchorMax = "0.5 0.21",
+                        OffsetMin = "-70 -70",
+                        OffsetMax = "70 70"
                     }
                 }
             });
